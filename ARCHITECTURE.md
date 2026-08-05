@@ -172,6 +172,11 @@ The worker launches the configured runtime non-interactively:
 - OpenCode uses `opencode run` with streaming JSON events, auto-approved
   permissions, and the prompt passed as its run message.
 
+A worker may also pin an optional `agent` and `model`. When set, the worker
+passes them to the runtime (`-c agent=` and `-m` for Codex, `--agent` and
+`--model` for Claude Code and OpenCode) and advertises them during
+registration so the UI can show which agent and model a worker runs.
+
 All three runtimes receive the same generated prompt and produce the same
 bounded event and completion contract.
 

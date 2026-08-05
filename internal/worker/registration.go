@@ -80,6 +80,8 @@ func (manager *Manager) registration() protocol.WorkerRegistration {
 		WorkerVersion:              manager.options.WorkerVersion,
 		Runtime:                    manager.config.Runtime,
 		RuntimeVersion:             manager.health.RuntimeVersion,
+		Agent:                      manager.config.Agent,
+		Model:                      manager.config.Model,
 		Capacity:                   manager.config.MaxConcurrent,
 		ActiveCount:                len(manager.slots),
 		Health:                     manager.health.State,

@@ -980,6 +980,55 @@ func createManagedTestRepository(t *testing.T, store *Store, remoteIdentity stri
 	return repository
 }
 
+func TestWorkerRegistrationPersistsAgentAndModel(t *testing.T) {
+	store := newTestStore(t)
+	worker, err := store.RegisterWorker(context.Background(), workerA, protocol.WorkerRegistration{
+		Name:           "agent-model-worker",
+		WorkerVersion:  "test",
+		Runtime:        protocol.RuntimeOpenCode,
+		RuntimeVersion: "1.18.13",
+		Agent:          "build",
+		Model:          "openai/gpt-5",
+		Capacity:       1,
+		Health:         "healthy",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if worker.Agent != "build" || worker.Model != "openai/gpt-5" {
+		t.Fatalf("registered agent/model = %q %q", worker.Agent, worker.Model)
+	}
+	listed, err := store.Workers(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 1 || listed[0].Agent != "build" || listed[0].Model != "openai/gpt-5" {
+		t.Fatalf("listed worker agent/model = %#v", listed)
+	}
+	worker, err = store.RegisterWorker(context.Background(), workerA, protocol.WorkerRegistration{
+		Name:           "agent-model-worker",
+		WorkerVersion:  "test",
+		Runtime:        protocol.RuntimeOpenCode,
+		RuntimeVersion: "1.18.13",
+		Agent:          "",
+		Model:          "",
+		Capacity:       1,
+		Health:         "healthy",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if worker.Agent != "" || worker.Model != "" {
+		t.Fatalf("cleared agent/model = %q %q", worker.Agent, worker.Model)
+	}
+	_, err = store.RegisterWorker(context.Background(), workerB, protocol.WorkerRegistration{
+		Name: "oversized", WorkerVersion: "test", Runtime: protocol.RuntimeOpenCode,
+		RuntimeVersion: "1.18.13", Agent: strings.Repeat("a", 201),
+		Capacity: 1, Health: "healthy",
+	})
+	assertErrorCode(t, err, "invalid_agent")
+}
+
 func TestWorkerRuntimeDeterminesExecutionAndCannotChange(t *testing.T) {
 	store := newTestStore(t)
 	worker, err := store.RegisterWorker(context.Background(), workerA, protocol.WorkerRegistration{

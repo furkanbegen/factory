@@ -18,6 +18,13 @@ export function runtimeLabel(runtime: string): string {
   return "Codex";
 }
 
+export function runtimeSpec(worker: { model?: string; agent?: string }): string | null {
+  const parts: string[] = [];
+  if (worker.model) parts.push(worker.model);
+  if (worker.agent) parts.push(`agent ${worker.agent}`);
+  return parts.length > 0 ? parts.join(" · ") : null;
+}
+
 export function timeAgo(value: string, now = Date.now()): string {
   const seconds = Math.max(0, Math.floor((now - new Date(value).getTime()) / 1000));
   if (seconds < 10) return "just now";

@@ -22,6 +22,8 @@ export interface Worker {
   worker_version: string;
   runtime: Runtime;
   runtime_version: string;
+  agent?: string;
+  model?: string;
   capacity: number;
   active_count: number;
   health: "healthy" | "unhealthy";

@@ -45,6 +45,9 @@ Edit `~/.factory/worker.toml`:
 server = "http://127.0.0.1:7337"
 name = "local-codex"
 runtime = "codex"
+# Optional: agent profile and model passed to the selected runtime.
+# agent = "build"
+# model = "openai/gpt-5"
 max_concurrent = 1
 ```
 

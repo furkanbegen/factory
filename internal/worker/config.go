@@ -30,6 +30,8 @@ type Config struct {
 	Server        string                      `toml:"server"`
 	Name          string                      `toml:"name"`
 	Runtime       string                      `toml:"runtime"`
+	Agent         string                      `toml:"agent"`
+	Model         string                      `toml:"model"`
 	MaxConcurrent int                         `toml:"max_concurrent"`
 	DataDirectory string                      `toml:"data_directory"`
 	SourceAccess  []string                    `toml:"source_access"`
@@ -112,6 +114,12 @@ func validateConfig(config Config) error {
 	if config.Runtime != "" && !protocol.SupportedRuntime(config.Runtime) {
 		return errors.New("runtime must be codex, claude-code, or opencode")
 	}
+	if err := validateAgentModel("agent", config.Agent); err != nil {
+		return err
+	}
+	if err := validateAgentModel("model", config.Model); err != nil {
+		return err
+	}
 	if config.MaxConcurrent < 1 || config.MaxConcurrent > maxConcurrent {
 		return fmt.Errorf("max_concurrent must be between 1 and %d", maxConcurrent)
 	}
@@ -141,6 +149,19 @@ func validateConfig(config Config) error {
 		if len(repository.BaseBranch) > 244 {
 			return fmt.Errorf("repository %q base_branch must be at most 244 bytes", key)
 		}
+	}
+	return nil
+}
+
+func validateAgentModel(field, value string) error {
+	if value == "" {
+		return nil
+	}
+	if value != strings.TrimSpace(value) {
+		return fmt.Errorf("%s must not have surrounding whitespace", field)
+	}
+	if len(value) > 200 {
+		return fmt.Errorf("%s must be at most 200 bytes", field)
 	}
 	return nil
 }

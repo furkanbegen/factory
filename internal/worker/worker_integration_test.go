@@ -1002,6 +1002,129 @@ func TestOpenCodeHealthRequiresConfiguredCredentials(t *testing.T) {
 	}
 }
 
+func TestSupervisorPassesAgentAndModelFlags(t *testing.T) {
+	t.Setenv("FACTORY_TEST_SUPERVISOR", "1")
+	cases := []struct {
+		name       string
+		runtime    string
+		script     string
+		wantResult string
+	}{
+		{
+			name:       "codex",
+			runtime:    protocol.RuntimeCodex,
+			wantResult: "completed by flagged fake Codex",
+			script: `#!/bin/sh
+set -eu
+[ "$1" = "exec" ] || exit 90
+[ "$2" = "--json" ] || exit 90
+[ "$3" = "--color" ] || exit 90
+[ "$4" = "never" ] || exit 90
+[ "$5" = "-m" ] || exit 90
+[ "$6" = "test-model" ] || exit 90
+[ "$7" = "-c" ] || exit 90
+[ "$8" = "agent=test-agent" ] || exit 90
+[ "$9" = "--output-last-message" ] || exit 90
+result="${10}"
+[ "${11}" = "-" ] || exit 90
+prompt="$(cat)"
+printf 'completed by flagged fake Codex' > "$result"
+echo '{"type":"thread.started","thread_id":"flagged"}'
+`,
+		},
+		{
+			name:       "claude-code",
+			runtime:    protocol.RuntimeClaudeCode,
+			wantResult: "completed by flagged fake Claude",
+			script: `#!/bin/sh
+set -eu
+[ "$1" = "--print" ] || exit 90
+[ "$2" = "--output-format" ] || exit 90
+[ "$3" = "stream-json" ] || exit 90
+[ "$4" = "--verbose" ] || exit 90
+[ "$5" = "--permission-mode" ] || exit 90
+[ "$6" = "bypassPermissions" ] || exit 90
+[ "$7" = "--model" ] || exit 90
+[ "$8" = "test-model" ] || exit 90
+[ "$9" = "--agent" ] || exit 90
+[ "${10}" = "test-agent" ] || exit 90
+prompt="$(cat)"
+[ "$prompt" = "complete this task" ] || exit 91
+echo '{"type":"result","subtype":"success","result":"completed by flagged fake Claude"}'
+`,
+		},
+		{
+			name:       "opencode",
+			runtime:    protocol.RuntimeOpenCode,
+			wantResult: "completed by flagged fake OpenCode",
+			script: `#!/bin/sh
+set -eu
+[ "$1" = "run" ] || exit 90
+[ "$2" = "--format" ] || exit 90
+[ "$3" = "json" ] || exit 90
+[ "$4" = "--auto" ] || exit 90
+[ "$5" = "--model" ] || exit 90
+[ "$6" = "test-model" ] || exit 90
+[ "$7" = "--agent" ] || exit 90
+[ "$8" = "test-agent" ] || exit 90
+[ "$9" = "complete this task" ] || exit 91
+echo '{"type":"text","part":{"type":"text","text":"completed by flagged fake OpenCode"}}'
+echo '{"type":"step_finish"}'
+`,
+		},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			runtimePath := filepath.Join(t.TempDir(), test.name)
+			if err := os.WriteFile(runtimePath, []byte(test.script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			repository := createRepository(t, test.name+"-flags")
+			process, err := startSupervisor(
+				[]string{os.Args[0], "-test.run=TestWorkerSupervisorHelperProcess", "--"},
+				supervisorInit{
+					Runtime:           test.runtime,
+					RuntimeExecutable: runtimePath,
+					Agent:             "test-agent",
+					Model:             "test-model",
+					Worktree:          repository.path,
+					ResultPath:        filepath.Join(t.TempDir(), "unused-result"),
+					Prompt:            "complete this task",
+					TimeoutSeconds:    60,
+				},
+				io.Discard,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := process.awaitReady(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if err := process.send("start"); err != nil {
+				t.Fatal(err)
+			}
+			timeout := time.NewTimer(10 * time.Second)
+			defer timeout.Stop()
+			for {
+				select {
+				case message := <-process.messages:
+					if message.Type != "exit" {
+						continue
+					}
+					if message.ExitCode != 0 || message.Reason != "exited" || message.Result != test.wantResult {
+						t.Fatalf("%s flagged supervisor exit = %#v", test.name, message)
+					}
+					return
+				case err := <-process.decodeErrors:
+					t.Fatalf("decode %s supervisor output: %v", test.name, err)
+				case <-timeout.C:
+					t.Fatalf("%s flagged supervisor did not exit", test.name)
+				}
+			}
+		})
+	}
+}
+
 func testOptions(codexPath string) Options {
 	return Options{
 		GitExecutable:        "git",
@@ -2015,6 +2138,34 @@ base_branch = "release/2026.07"
 	}
 	if _, err := LoadConfig(configPath); err == nil || !strings.Contains(err.Error(), "unknown") {
 		t.Fatalf("unknown field error = %v", err)
+	}
+}
+
+func TestLoadConfigValidatesAgentAndModel(t *testing.T) {
+	root := t.TempDir()
+	load := func(agent, model string) (Config, error) {
+		configPath := filepath.Join(root, "worker.toml")
+		body := fmt.Sprintf("server = \"http://127.0.0.1:7337\"\nname = \"local\"\nruntime = \"opencode\"\nmax_concurrent = 1\ndata_directory = %q\nagent = %q\nmodel = %q\n", filepath.Join(root, "data"), agent, model)
+		if err := os.WriteFile(configPath, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return LoadConfig(configPath)
+	}
+	config, err := load("build", "openai/gpt-5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Agent != "build" || config.Model != "openai/gpt-5" {
+		t.Fatalf("agent/model = %q %q", config.Agent, config.Model)
+	}
+	if _, err := load("", "openai/gpt-5"); err != nil {
+		t.Fatalf("empty agent rejected: %v", err)
+	}
+	if _, err := load(" build", ""); err == nil || !strings.Contains(err.Error(), "whitespace") {
+		t.Fatalf("whitespace agent error = %v", err)
+	}
+	if _, err := load("", strings.Repeat("m", 201)); err == nil || !strings.Contains(err.Error(), "200 bytes") {
+		t.Fatalf("oversized model error = %v", err)
 	}
 }
 

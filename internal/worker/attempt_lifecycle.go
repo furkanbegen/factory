@@ -142,6 +142,8 @@ func (manager *Manager) runAttempt(parent context.Context, claim protocol.Claim,
 	process, err := startSupervisor(manager.options.SupervisorCommand, supervisorInit{
 		Runtime:           manager.config.Runtime,
 		RuntimeExecutable: manager.options.RuntimeExecutable,
+		Agent:             manager.config.Agent,
+		Model:             manager.config.Model,
 		Worktree:          value.Path,
 		ResultPath:        path,
 		Prompt:            prompt,

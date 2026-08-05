@@ -30,6 +30,8 @@ const (
 type supervisorInit struct {
 	Runtime           string `json:"runtime"`
 	RuntimeExecutable string `json:"runtime_executable"`
+	Agent             string `json:"agent,omitempty"`
+	Model             string `json:"model,omitempty"`
 	Worktree          string `json:"worktree"`
 	ResultPath        string `json:"result_path"`
 	Prompt            string `json:"prompt"`
@@ -207,7 +209,14 @@ func superviseRuntime(
 	var opencodeResult *opencodeResultCapture
 	switch init.Runtime {
 	case protocol.RuntimeCodex:
-		arguments = []string{"exec", "--json", "--color", "never", "--output-last-message", init.ResultPath, "-"}
+		arguments = []string{"exec", "--json", "--color", "never"}
+		if init.Model != "" {
+			arguments = append(arguments, "-m", init.Model)
+		}
+		if init.Agent != "" {
+			arguments = append(arguments, "-c", "agent="+init.Agent)
+		}
+		arguments = append(arguments, "--output-last-message", init.ResultPath, "-")
 	case protocol.RuntimeClaudeCode:
 		arguments = []string{
 			"--print",
@@ -215,9 +224,22 @@ func superviseRuntime(
 			"--verbose",
 			"--permission-mode", "bypassPermissions",
 		}
+		if init.Model != "" {
+			arguments = append(arguments, "--model", init.Model)
+		}
+		if init.Agent != "" {
+			arguments = append(arguments, "--agent", init.Agent)
+		}
 		claudeResult = &claudeResultCapture{}
 	case protocol.RuntimeOpenCode:
-		arguments = []string{"run", "--format", "json", "--auto", init.Prompt}
+		arguments = []string{"run", "--format", "json", "--auto"}
+		if init.Model != "" {
+			arguments = append(arguments, "--model", init.Model)
+		}
+		if init.Agent != "" {
+			arguments = append(arguments, "--agent", init.Agent)
+		}
+		arguments = append(arguments, init.Prompt)
 		opencodeResult = &opencodeResultCapture{}
 	default:
 		return finishSupervisorStartFailure(anchor, anchorIdentity, writer, errors.New("unsupported worker runtime"))

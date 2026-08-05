@@ -45,10 +45,10 @@ mkdir -p ~/.factory
 cp examples/worker.toml ~/.factory/worker.toml
 ```
 
-Edit `~/.factory/worker.toml` to select `codex`, `claude-code`, or `opencode`.
-Workers need no repository list. They probe local `gh` access and acquire
-centrally managed GitHub repositories on demand. Then start the server and
-worker:
+Edit `~/.factory/worker.toml` to select `codex`, `claude-code`, or `opencode`,
+optionally pinning an `agent` and `model` for that runtime. Workers need no
+repository list. They probe local `gh` access and acquire centrally managed
+GitHub repositories on demand. Then start the server and worker:
 
 ```sh
 just run

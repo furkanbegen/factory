@@ -879,6 +879,14 @@ func (s *Store) RegisterWorker(ctx context.Context, workerID string, input proto
 	if len(input.RuntimeVersion) > 1024 {
 		return protocol.Worker{}, invalid("invalid_runtime_version", "runtime_version must be at most 1024 bytes")
 	}
+	input.Agent = strings.TrimSpace(input.Agent)
+	input.Model = strings.TrimSpace(input.Model)
+	if len(input.Agent) > 200 {
+		return protocol.Worker{}, invalid("invalid_agent", "agent must be at most 200 bytes")
+	}
+	if len(input.Model) > 200 {
+		return protocol.Worker{}, invalid("invalid_model", "model must be at most 200 bytes")
+	}
 	if input.Capacity < 1 || input.Capacity > 4 || input.ActiveCount < 0 || input.ActiveCount > input.Capacity {
 		return protocol.Worker{}, invalid("invalid_capacity", "capacity must be 1 through 4 and active_count cannot exceed it")
 	}
@@ -1052,19 +1060,21 @@ func (s *Store) RegisterWorker(ctx context.Context, workerID string, input proto
 	}
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO workers(
-			id, name, worker_version, runtime, runtime_version, capacity, active_count,
+			id, name, worker_version, runtime, runtime_version, agent, model, capacity, active_count,
 			health, source_access_json, accepts_managed_repositories,
 			managed_repository_ids_json, retained_worktrees_json, registered_at, last_heartbeat
 		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			name=excluded.name, worker_version=excluded.worker_version, runtime_version=excluded.runtime_version,
+			agent=excluded.agent, model=excluded.model,
 			capacity=excluded.capacity, active_count=excluded.active_count, health=excluded.health,
 			source_access_json=excluded.source_access_json,
 			accepts_managed_repositories=excluded.accepts_managed_repositories,
 			managed_repository_ids_json=excluded.managed_repository_ids_json,
 			retained_worktrees_json=excluded.retained_worktrees_json, last_heartbeat=excluded.last_heartbeat
 	`, workerID, input.Name, input.WorkerVersion, input.Runtime, input.RuntimeVersion,
+		input.Agent, input.Model,
 		input.Capacity, input.ActiveCount, input.Health, sourceAccessJSON,
 		input.AcceptsManagedRepositories, managedRepositoryIDsJSON, retained, now, now)
 	if err != nil {
@@ -1286,6 +1296,7 @@ func (s *Store) RegisterWorker(ctx context.Context, workerID string, input proto
 func (s *Store) Workers(ctx context.Context) ([]protocol.Worker, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT w.id, w.name, w.worker_version, w.runtime, w.runtime_version,
+		       w.agent, w.model,
 		       w.capacity, w.active_count, w.health, w.source_access_json,
 		       w.accepts_managed_repositories, w.managed_repository_ids_json,
 		       w.retained_worktrees_json,
@@ -1330,6 +1341,7 @@ func (s *Store) Workers(ctx context.Context) ([]protocol.Worker, error) {
 func (s *Store) Worker(ctx context.Context, id string) (protocol.Worker, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT w.id, w.name, w.worker_version, w.runtime, w.runtime_version,
+		       w.agent, w.model,
 		       w.capacity, w.active_count, w.health, w.source_access_json,
 		       w.accepts_managed_repositories, w.managed_repository_ids_json,
 		       w.retained_worktrees_json,
@@ -1364,6 +1376,7 @@ func scanWorker(row scanner, now time.Time) (protocol.Worker, error) {
 	var acceptsManagedRepositories int
 	var registered, heartbeat int64
 	if err := row.Scan(&worker.ID, &worker.Name, &worker.WorkerVersion, &worker.Runtime, &worker.RuntimeVersion,
+		&worker.Agent, &worker.Model,
 		&worker.Capacity, &worker.ActiveCount, &worker.Health, &sourceAccess,
 		&acceptsManagedRepositories, &managedRepositoryIDs,
 		&retained, &registered, &heartbeat,

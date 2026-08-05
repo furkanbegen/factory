@@ -11,12 +11,22 @@ repository into its bounded local cache. Windows is not supported.
 server = "http://127.0.0.1:7337"
 name = "local-codex"
 runtime = "codex"
+# Optional: agent profile and model passed to the selected runtime.
+# agent = "build"
+# model = "openai/gpt-5"
 max_concurrent = 1
 ```
 
 `runtime` is `codex`, `claude-code`, or `opencode`. A worker never switches
 runtime per task. Run two workers when you want to send the same task to
 different agents.
+
+Optional `agent` and `model` select a runtime agent profile and model for the
+worker. Both are passed through as command-line flags only when set; when
+omitted, the runtime uses its own default. Codex receives `-c agent=<name>`
+and `-m <model>`, Claude Code receives `--agent <name>` and `--model <model>`,
+and OpenCode receives `--agent <name>` and `--model <provider/model>`. Each
+must be a single trimmed token of at most 200 bytes.
 
 When `data_directory` is omitted, Factory derives an absolute path beside the
 configuration as `workers/<config filename without .toml>`. For example,

@@ -14,7 +14,7 @@ import {
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { api } from "./api";
-import { runtimeLabel, stateLabel, timeAgo } from "./format";
+import { runtimeLabel, runtimeSpec, stateLabel, timeAgo } from "./format";
 import { useVisibleInterval } from "./polling";
 import type { Worker } from "./types";
 import {
@@ -111,6 +111,7 @@ export function WorkersView({
                 </span>
                 <span className="versions">
                   <small>{runtimeLabel(worker.runtime)} {worker.runtime_version || "unknown"}</small>
+                  {runtimeSpec(worker) && <small>{runtimeSpec(worker)}</small>}
                   <small>Worker {worker.worker_version || "unknown"}</small>
                 </span>
                 <span className="last-seen">{timeAgo(worker.last_heartbeat)}</span>
@@ -174,6 +175,7 @@ export function WorkerDetail({
           <span className={`runtime-badge runtime-${data.runtime}`}>
             <Play size={10} /> {runtimeLabel(data.runtime)}
           </span>
+          {runtimeSpec(data) && <span className="runtime-badge">{runtimeSpec(data)}</span>}
           <p>Registered {new Date(data.registered_at).toLocaleString()}</p>
           </div>
         </div>
@@ -246,6 +248,8 @@ export function WorkerDetail({
           <dl className="metadata">
             <div><dt>Status</dt><dd>{data.online ? "Online" : "Offline"} · {stateLabel(data.health)}</dd></div>
             <div><dt>Runtime</dt><dd>{runtimeLabel(data.runtime)}</dd></div>
+            <div><dt>Model</dt><dd>{data.model || "Default"}</dd></div>
+            <div><dt>Agent</dt><dd>{data.agent || "Default"}</dd></div>
             <div><dt>Capacity</dt><dd>{data.active_count} / {data.capacity}</dd></div>
             <div><dt>Last seen</dt><dd>{timeAgo(data.last_heartbeat)}</dd></div>
             <div><dt>Runtime version</dt><dd>{data.runtime_version || "Unknown"}</dd></div>

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { eventSummary, runtimeLabel } from "./format";
+import { eventSummary, runtimeLabel, runtimeSpec } from "./format";
 import type { AttemptEvent } from "./types";
 
 function event(payload: unknown, kind = "codex"): AttemptEvent {
@@ -11,6 +11,15 @@ describe("runtimeLabel", () => {
     expect(runtimeLabel("codex")).toBe("Codex");
     expect(runtimeLabel("claude-code")).toBe("Claude Code");
     expect(runtimeLabel("opencode")).toBe("OpenCode");
+  });
+});
+
+describe("runtimeSpec", () => {
+  it("combines model and agent for display", () => {
+    expect(runtimeSpec({ model: "openai/gpt-5", agent: "build" })).toBe("openai/gpt-5 · agent build");
+    expect(runtimeSpec({ model: "gpt-5" })).toBe("gpt-5");
+    expect(runtimeSpec({ agent: "build" })).toBe("agent build");
+    expect(runtimeSpec({})).toBeNull();
   });
 });
 

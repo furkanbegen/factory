@@ -71,6 +71,8 @@ type WorkerRegistration struct {
 	WorkerVersion              string                   `json:"worker_version"`
 	Runtime                    string                   `json:"runtime"`
 	RuntimeVersion             string                   `json:"runtime_version"`
+	Agent                      string                   `json:"agent,omitempty"`
+	Model                      string                   `json:"model,omitempty"`
 	Capacity                   int                      `json:"capacity"`
 	ActiveCount                int                      `json:"active_count"`
 	Health                     string                   `json:"health"`
@@ -126,6 +128,8 @@ type Worker struct {
 	WorkerVersion              string             `json:"worker_version"`
 	Runtime                    string             `json:"runtime"`
 	RuntimeVersion             string             `json:"runtime_version"`
+	Agent                      string             `json:"agent,omitempty"`
+	Model                      string             `json:"model,omitempty"`
 	Capacity                   int                `json:"capacity"`
 	ActiveCount                int                `json:"active_count"`
 	Health                     string             `json:"health"`

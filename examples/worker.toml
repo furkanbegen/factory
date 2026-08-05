@@ -4,6 +4,11 @@ name = "local"
 # One worker identity runs exactly one runtime: "codex", "claude-code", or
 # "opencode".
 runtime = "codex"
+# Optional agent profile and model passed to the selected runtime. When omitted,
+# each runtime uses its own configured default. Codex selects agents through its
+# "agent" config key; Claude Code and OpenCode use their --agent flag.
+# agent = "build"
+# model = "openai/gpt-5"
 max_concurrent = 1
 # With no data_directory, this worker stores durable state in
 # ~/.factory/workers/worker, derived from this file's name (worker.toml).

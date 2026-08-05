@@ -116,6 +116,12 @@ function TaskCard({ task, worker, onClick }: { task: Task; worker?: Worker; onCl
         {worker && (
           <>
             <span>{runtimeLabel(worker.runtime)}</span>
+            {worker.model && (
+              <>
+                <span aria-hidden="true">·</span>
+                <span>{worker.model}</span>
+              </>
+            )}
             <span aria-hidden="true">·</span>
           </>
         )}
