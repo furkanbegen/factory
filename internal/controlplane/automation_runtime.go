@@ -1848,6 +1848,7 @@ func (s *Store) dispatchOccurrence(ctx context.Context, occurrenceID string) err
 	var timeoutSeconds int
 	var issueNumber, pullRequestNumber, scheduledAt sql.NullInt64
 	var issueKey sql.NullString
+	var candidateRepositoryIDs []byte
 	var scheduleKind, runRequestKey sql.NullString
 	var workflowID, workflowTitle string
 	var workflowRevisionNumber, automationEnabled, workflowEnabled, repositoryEnabled int
@@ -1859,6 +1860,7 @@ func (s *Store) dispatchOccurrence(ctx context.Context, occurrenceID string) err
 		       occurrence.task_request_key,
 		       issue.issue_number, pull_request.pull_request_number,
 		       jira.issue_key,
+		       COALESCE(jira_config.candidate_repository_ids_json, '[]'),
 		       schedule.kind, schedule.scheduled_at, schedule.run_request_key,
 		       revision.workflow_id, revision.title, revision.revision_number,
 		       automation.enabled, workflow.enabled, repository.enabled
@@ -1870,6 +1872,8 @@ func (s *Store) dispatchOccurrence(ctx context.Context, occurrenceID string) err
 		  ON pull_request.occurrence_id = occurrence.id AND automation.trigger_type = 'github_pull_request'
 		LEFT JOIN automation_jira_issue_occurrences jira
 		  ON jira.occurrence_id = occurrence.id AND automation.trigger_type = 'jira_issue'
+		LEFT JOIN automation_jira_issue_triggers jira_config
+		  ON jira_config.automation_id = automation.id
 		LEFT JOIN automation_schedule_occurrences schedule
 		  ON schedule.occurrence_id = occurrence.id AND automation.trigger_type = 'schedule'
 		JOIN workflow_revisions revision ON revision.id = occurrence.workflow_revision_id
@@ -1880,6 +1884,7 @@ func (s *Store) dispatchOccurrence(ctx context.Context, occurrenceID string) err
 		&automationID, &automationTitle, &triggerType, &workflowRevisionID, &repositoryID,
 		&repositoryIdentity, &contextValue, &timeoutSeconds, &prompt, &requestKey,
 		&issueNumber, &pullRequestNumber, &issueKey,
+		&candidateRepositoryIDs,
 		&scheduleKind, &scheduledAt, &runRequestKey,
 		&workflowID, &workflowTitle, &workflowRevisionNumber,
 		&automationEnabled, &workflowEnabled, &repositoryEnabled,
@@ -1933,8 +1938,14 @@ func (s *Store) dispatchOccurrence(ctx context.Context, occurrenceID string) err
 		route.SourceAccess = protocol.SourceAccess{Provider: "github", Hostname: "github.com"}
 		requiresSourceAccess = true
 	}
+	var repositorySetIDs []string
+	if triggerType == protocol.AutomationTriggerJiraIssue && len(candidateRepositoryIDs) > 0 {
+		if err := json.Unmarshal(candidateRepositoryIDs, &repositorySetIDs); err != nil {
+			return unavailable(err)
+		}
+	}
 	now := s.now().UnixMilli()
-	selection, err := s.selectTaskRouteWithSourceRequirement(ctx, tx, route, now, requiresSourceAccess, nil)
+	selection, err := s.selectTaskRouteWithSourceRequirement(ctx, tx, route, now, requiresSourceAccess, repositorySetIDs)
 	if err != nil {
 		var serviceErr *ServiceError
 		if errors.As(err, &serviceErr) && serviceErr.Code == "no_eligible_worker" {
@@ -2006,6 +2017,19 @@ func (s *Store) dispatchOccurrence(ctx context.Context, occurrenceID string) err
 			VALUES (?, ?, ?, ?, 'queued', ?, ?)
 		`, executionID, taskID, selection.workerID, selection.runtime, now, now); err != nil {
 			return unavailable(err)
+		}
+		seq := 0
+		for _, setRepositoryID := range repositorySetIDs {
+			if setRepositoryID == repositoryID {
+				continue
+			}
+			seq++
+			if _, err := tx.ExecContext(ctx, `
+				INSERT INTO task_repository_sets(task_id, repository_id, seq, is_primary)
+				VALUES (?, ?, ?, 0)
+			`, taskID, setRepositoryID, seq); err != nil {
+				return unavailable(err)
+			}
 		}
 	}
 	result, err := tx.ExecContext(ctx, `

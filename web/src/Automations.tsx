@@ -338,6 +338,7 @@ export function AutomationDetail({
                 <div><dt>Issue state</dt><dd>{automation.trigger.state}</dd></div>
                 <div><dt>Assignee</dt><dd>{automation.trigger.assignee === "currentUser()" ? "Assigned to me (currentUser())" : automation.trigger.assignee}</dd></div>
                 <div><dt>Project keys</dt><dd>{automation.trigger.project_keys.join(", ") || "Any"}</dd></div>
+                <div><dt>Candidate repositories</dt><dd>{automation.trigger.candidate_repository_ids.length ? `${automation.trigger.candidate_repository_ids.length} candidate repos` : "None"}</dd></div>
                 <div><dt>JQL</dt><dd className="mono">{automation.trigger.jql}</dd></div>
               </> : <>
                 <div><dt>{automation.trigger.type === "github_pull_request" ? "Pull request state" : "Issue state"}</dt><dd>{automation.trigger.state}</dd></div>
@@ -666,6 +667,7 @@ function AutomationForm({
   const timezoneID = useId();
   const timeoutID = useId();
   const contextID = useId();
+  const candidateReposID = useId();
   const titleRef = useRef<HTMLInputElement>(null);
   const closeRef = useRef(onClose);
   const requestRef = useRef<{ fingerprint: string; key: string } | undefined>(undefined);
@@ -673,6 +675,8 @@ function AutomationForm({
   const workflows = useQuery({ queryKey: ["workflows", "automation-form"], queryFn: api.allWorkflows });
   const repositories = useQuery({ queryKey: ["repositories"], queryFn: api.repositories });
   const current = detail?.automation;
+  const candidateRepoItems = (repositories.data ?? [])
+    .filter((repo) => repo.enabled && repo.id !== current?.repository_id);
   const [triggerType, setTriggerType] = useState<AutomationTrigger["type"]>(current?.trigger.type ?? "github_issue");
   const isPullRequest = triggerType === "github_pull_request";
   const isSchedule = triggerType === "schedule";
@@ -688,6 +692,9 @@ function AutomationForm({
   );
   const [jiraState, setJiraState] = useState<"open" | "closed">(
     current?.trigger.type === "jira_issue" ? current.trigger.state : "open",
+  );
+  const [jiraCandidateRepos, setJiraCandidateRepos] = useState<string[]>(
+    current?.trigger.type === "jira_issue" ? current.trigger.candidate_repository_ids : [],
   );
   useEffect(() => {
     closeRef.current = onClose;
@@ -742,6 +749,7 @@ function AutomationForm({
       if (projectKeys.length > 20 || projectKeys.some((key) => new TextEncoder().encode(key).length > 32)) nextErrors.projects = "Use at most 20 project keys of 32 bytes each.";
       const unsafe = jiraAssignee.match(/["'\\()[\]]/);
       if (unsafe) nextErrors.assignee = "Assignee must not contain quotes, backslashes, or parentheses.";
+      if (jiraCandidateRepos.length > 5) nextErrors.candidates = "Use at most 5 candidate repositories.";
     }
     if (!isSchedule && (!Number.isInteger(pollInterval) || pollInterval < 10 || pollInterval > 86_400)) nextErrors.interval = "Use 10 to 86,400 seconds.";
     if (isSchedule && cron.split(" ").length !== 5) nextErrors.cron = "Enter exactly five cron fields, with no seconds field.";
@@ -761,6 +769,7 @@ function AutomationForm({
       project_keys: jiraProjectKeys.split(",").map((key) => key.trim().toUpperCase()).filter(Boolean),
       assignee: normalizeJiraAssignee(jiraAssignee),
       required_labels: labels,
+      candidate_repository_ids: jiraCandidateRepos,
       poll_interval_seconds: pollInterval,
     } : isPullRequest ? {
       type: "github_pull_request",
@@ -905,6 +914,23 @@ function AutomationForm({
               </Field>
               <Field label="JQL preview" htmlFor={contextID} hint="Composed from the fields above. No free-form JQL is accepted.">
                 <code className="jql-preview">{buildJqlPreview(jiraProjectKeys, jiraAssignee, jiraLabels, jiraState)}</code>
+              </Field>
+              <Field label="Candidate repositories" htmlFor={candidateReposID} error={errors.candidates} hint="Optional · up to 5 · the agent gets one worktree per candidate and edits only what the request needs.">
+                <div id={candidateReposID} className="delegate-repo-set">
+                  {candidateRepoItems.length === 0
+                    ? <span className="field-hint">{repositories.isPending ? "Loading managed repositories…" : "No other enabled managed repositories."}</span>
+                    : candidateRepoItems.map((repo) => (
+                      <label className="confirmation-check" key={repo.id}>
+                        <input
+                          type="checkbox"
+                          checked={jiraCandidateRepos.includes(repo.id)}
+                          onChange={(event) => setJiraCandidateRepos((current) =>
+                            event.target.checked ? [...current, repo.id] : current.filter((id) => id !== repo.id))}
+                        />
+                        {repo.remote_identity}
+                      </label>
+                    ))}
+                </div>
               </Field>
             </> : <>
               <Field label="Required labels" htmlFor={labelsID} error={errors.labels} hint="Comma separated · up to 20">

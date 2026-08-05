@@ -179,6 +179,7 @@ export interface JiraIssueTrigger {
 	project_keys: string[];
 	assignee: string;
 	required_labels: string[];
+	candidate_repository_ids: string[];
 	poll_interval_seconds: number;
 }
 

@@ -196,6 +196,55 @@ func TestJiraAutomationRejectsUnsafeComposedJQLInput(t *testing.T) {
 	}
 }
 
+func TestJiraAutomationCandidateRepositoriesPersistAndDispatchMultiRepositoryTask(t *testing.T) {
+	store, detail := createJiraAutomationFixture(t, true)
+	additional := createManagedTestRepository(t, store, "github.com/sarp-dev-team/argocd")
+	updated, err := store.UpdateAutomation(context.Background(), detail.Automation.ID, protocol.UpdateAutomationRequest{
+		ExpectedVersion: 1, Title: "Platform requests", WorkflowID: detail.Automation.WorkflowID,
+		Context: "Follow the repo-role conventions.", TimeoutSeconds: 3600,
+		Trigger: protocol.AutomationTrigger{
+			Type: protocol.AutomationTriggerJiraIssue, State: "open",
+			RequiredLabels:         []string{"factory-platform"},
+			CandidateRepositoryIDs: []string{additional.ID}, PollIntervalSeconds: 10,
+		},
+	})
+	if err != nil || len(updated.Automation.Trigger.CandidateRepositoryIDs) != 1 ||
+		updated.Automation.Trigger.CandidateRepositoryIDs[0] != additional.ID {
+		t.Fatalf("candidate repositories persisted = error %v, detail %#v", err, updated.Automation.Trigger)
+	}
+	var storedCandidate string
+	if err := store.db.QueryRow(`SELECT candidate_repository_ids_json FROM automation_jira_issue_triggers WHERE automation_id = ?`, detail.Automation.ID).Scan(&storedCandidate); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(storedCandidate, additional.ID) {
+		t.Fatalf("stored candidate repositories JSON = %q", storedCandidate)
+	}
+	enableAutomation(t, store, detail.Automation.ID)
+	evaluation := reserveAutomation(t, store)
+	match := testJiraIssue
+	match.Description = testJiraDescription
+	if err := store.completeJiraIssueAutomationSuccess(context.Background(), evaluation, []protocol.JiraIssueMatch{match}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.dispatchPendingOccurrences(context.Background(), 100); err != nil {
+		t.Fatal(err)
+	}
+	occurrences, err := store.AutomationOccurrences(context.Background(), detail.Automation.ID, 50)
+	if err != nil || len(occurrences) != 1 || occurrences[0].Task == nil {
+		t.Fatalf("dispatched occurrence = error %v, %#v", err, occurrences)
+	}
+	task, err := store.Task(context.Background(), occurrences[0].Task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(task.Task.RepositorySet) != 1 || task.Task.RepositorySet[0] != additional.ID {
+		t.Fatalf("dispatched task repository set = %#v, want the candidate repository", task.Task.RepositorySet)
+	}
+	if task.Task.RepositoryID != detail.Automation.RepositoryID {
+		t.Fatalf("dispatched task primary = %q, want the Automation repository %q", task.Task.RepositoryID, detail.Automation.RepositoryID)
+	}
+}
+
 func TestJiraAutomationEvaluationPersistsBeforeAtomicIdempotentDispatch(t *testing.T) {
 	store, detail := createJiraAutomationFixture(t, true)
 	enableAutomation(t, store, detail.Automation.ID)

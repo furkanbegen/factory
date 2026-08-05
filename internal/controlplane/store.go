@@ -1464,6 +1464,54 @@ func normalizeTaskRoute(route *protocol.TaskRoute) error {
 	return nil
 }
 
+func normalizeCandidateRepositoryIDs(ids []string) ([]string, error) {
+	normalized := make([]string, 0, len(ids))
+	seen := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" || len(id) > 200 {
+			return nil, errors.New("candidate repository IDs must be trimmed, nonblank, and at most 200 bytes")
+		}
+		if seen[id] {
+			return nil, errors.New("candidate repository IDs must be unique")
+		}
+		seen[id] = true
+		normalized = append(normalized, id)
+	}
+	if len(normalized) > protocol.MaxRepositorySetSize-1 {
+		return nil, fmt.Errorf(
+			"candidate_repository_ids may contain at most %d repositories", protocol.MaxRepositorySetSize-1)
+	}
+	sort.Strings(normalized)
+	return normalized, nil
+}
+
+func (s *Store) validateAutomationCandidateRepositories(
+	ctx context.Context,
+	tx *sql.Tx,
+	repositoryIDs []string,
+) error {
+	for _, repositoryID := range repositoryIDs {
+		var enabled, centrallyManaged int
+		err := tx.QueryRowContext(ctx, `
+			SELECT enabled, centrally_managed FROM repositories WHERE id = ?
+		`, repositoryID).Scan(&enabled, &centrallyManaged)
+		if errors.Is(err, sql.ErrNoRows) {
+			return invalid("candidate_repository_not_found", "a candidate repository was not found in the managed catalog")
+		}
+		if err != nil {
+			return unavailable(err)
+		}
+		if centrallyManaged == 0 {
+			return conflict("candidate_repository_not_managed", "a candidate repository is not managed by the control plane")
+		}
+		if enabled == 0 {
+			return conflict("candidate_repository_disabled", "a candidate repository is disabled")
+		}
+	}
+	return nil
+}
+
 func normalizeRepositorySetIDs(primaryID string, ids []string) ([]string, error) {
 	normalized := make([]string, 0, len(ids))
 	seen := make(map[string]bool, len(ids))
@@ -2245,6 +2293,11 @@ func (s *Store) Task(ctx context.Context, id string) (protocol.TaskDetail, error
 	if err != nil {
 		return detail, unavailable(err)
 	}
+	setIDs, err := s.repositorySetIDsForTask(ctx, id)
+	if err != nil {
+		return detail, unavailable(err)
+	}
+	detail.Task.RepositorySet = setIDs
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, execution_id, worker_id, attempt_number, state, lease_expires_at,
 		       supervisor_pid, process_identity, process_group_id, result, error,

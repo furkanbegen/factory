@@ -146,6 +146,11 @@ func normalizeAutomation(
 			assignee = "currentUser()"
 		}
 		value.Trigger.Assignee = assignee
+		candidateIDs, candidateErr := normalizeCandidateRepositoryIDs(value.Trigger.CandidateRepositoryIDs)
+		if candidateErr != nil {
+			return value, "", invalid("invalid_candidate_repositories", candidateErr.Error())
+		}
+		value.Trigger.CandidateRepositoryIDs = candidateIDs
 		jql, err := buildJiraJQL(projects, assignee, value.Trigger.RequiredLabels, value.Trigger.State)
 		if err != nil {
 			return value, "", invalid("invalid_jira_trigger", err.Error())
@@ -217,6 +222,10 @@ func (s *Store) CreateAutomation(
 	if err != nil {
 		return protocol.AutomationDetail{}, false, unavailable(err)
 	}
+	candidateRepositoryIDs, err := json.Marshal(value.Trigger.CandidateRepositoryIDs)
+	if err != nil {
+		return protocol.AutomationDetail{}, false, unavailable(err)
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return protocol.AutomationDetail{}, false, unavailable(err)
@@ -240,6 +249,9 @@ func (s *Store) CreateAutomation(
 		return protocol.AutomationDetail{}, false, unavailable(err)
 	}
 	if err := validateAutomationDependencies(ctx, tx, value.WorkflowID, value.RepositoryID, false); err != nil {
+		return protocol.AutomationDetail{}, false, err
+	}
+	if err := s.validateAutomationCandidateRepositories(ctx, tx, value.Trigger.CandidateRepositoryIDs); err != nil {
 		return protocol.AutomationDetail{}, false, err
 	}
 	var conflictingID string
@@ -293,10 +305,10 @@ func (s *Store) CreateAutomation(
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO automation_jira_issue_triggers(
 				automation_id, state, jql, project_keys_json, assignee,
-				required_labels_json, poll_interval_seconds
-			) VALUES (?, ?, ?, ?, ?, ?, ?)
+				required_labels_json, candidate_repository_ids_json, poll_interval_seconds
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		`, automationID, value.Trigger.State, value.Trigger.JQL, projectKeys, value.Trigger.Assignee,
-			labels, value.Trigger.PollIntervalSeconds); err != nil {
+			labels, candidateRepositoryIDs, value.Trigger.PollIntervalSeconds); err != nil {
 			return protocol.AutomationDetail{}, false, unavailable(err)
 		}
 	} else {
@@ -383,6 +395,7 @@ const automationSelect = `
 	       COALESCE(jira_trigger.jql, ''),
 	       COALESCE(jira_trigger.project_keys_json, '[]'),
 	       COALESCE(jira_trigger.assignee, ''),
+	       COALESCE(jira_trigger.candidate_repository_ids_json, '[]'),
 	       COALESCE(issue_trigger.poll_interval_seconds, pull_request_trigger.poll_interval_seconds, jira_trigger.poll_interval_seconds, 0),
 	       COALESCE(schedule_trigger.cron, ''), COALESCE(schedule_trigger.timezone, ''),
 	       schedule_trigger.next_due_at,
@@ -405,7 +418,7 @@ func scanAutomation(row scanner) (protocol.Automation, error) {
 	var automation protocol.Automation
 	var enabled, issueTriggerCount, pullRequestTriggerCount, scheduleTriggerCount, jiraTriggerCount int
 	var includeDrafts int
-	var labels, baseBranches, projectKeys []byte
+	var labels, baseBranches, projectKeys, candidateRepositoryIDs []byte
 	var jql, jiraAssignee string
 	var lastChecked, nextCheck, nextDue sql.NullInt64
 	var createdAt, updatedAt int64
@@ -416,7 +429,7 @@ func scanAutomation(row scanner) (protocol.Automation, error) {
 		&automation.Context, &automation.TimeoutSeconds, &enabled,
 		&automation.Version, &automation.Trigger.Type, &issueTriggerCount, &pullRequestTriggerCount, &scheduleTriggerCount, &jiraTriggerCount,
 		&automation.Trigger.State,
-		&includeDrafts, &labels, &baseBranches, &jql, &projectKeys, &jiraAssignee,
+		&includeDrafts, &labels, &baseBranches, &jql, &projectKeys, &jiraAssignee, &candidateRepositoryIDs,
 		&automation.Trigger.PollIntervalSeconds, &automation.Trigger.Cron, &automation.Trigger.Timezone,
 		&nextDue, &automation.Health.Status,
 		&automation.Health.Code, &automation.Health.Message,
@@ -459,6 +472,9 @@ func scanAutomation(row scanner) (protocol.Automation, error) {
 		automation.Trigger.JQL = jql
 		automation.Trigger.Assignee = jiraAssignee
 		if err := json.Unmarshal(projectKeys, &automation.Trigger.ProjectKeys); err != nil {
+			return automation, err
+		}
+		if err := json.Unmarshal(candidateRepositoryIDs, &automation.Trigger.CandidateRepositoryIDs); err != nil {
 			return automation, err
 		}
 	}
@@ -597,6 +613,10 @@ func (s *Store) UpdateAutomation(
 	if err != nil {
 		return protocol.AutomationDetail{}, unavailable(err)
 	}
+	candidateRepositoryIDs, err := json.Marshal(value.Trigger.CandidateRepositoryIDs)
+	if err != nil {
+		return protocol.AutomationDetail{}, unavailable(err)
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return protocol.AutomationDetail{}, unavailable(err)
@@ -606,7 +626,7 @@ func (s *Store) UpdateAutomation(
 	var issueTriggerCount, pullRequestTriggerCount, scheduleTriggerCount, jiraTriggerCount int
 	var currentTitle, currentTitleKey, currentWorkflowID, currentContext, currentType, currentState string
 	var currentCron, currentTimezone, currentJQL, currentAssignee string
-	var currentLabels, currentBaseBranches, currentProjectKeys []byte
+	var currentLabels, currentBaseBranches, currentProjectKeys, currentCandidateRepositoryIDs []byte
 	err = tx.QueryRowContext(ctx, `
 		SELECT automation.version, automation.enabled, automation.title, automation.title_key,
 		       automation.workflow_id, automation.context, automation.timeout_seconds,
@@ -622,6 +642,7 @@ func (s *Store) UpdateAutomation(
 		       COALESCE(jira_trigger.jql, ''),
 		       COALESCE(jira_trigger.project_keys_json, '[]'),
 		       COALESCE(jira_trigger.assignee, ''),
+		       COALESCE(jira_trigger.candidate_repository_ids_json, '[]'),
 		       COALESCE(issue_trigger.poll_interval_seconds, pull_request_trigger.poll_interval_seconds, jira_trigger.poll_interval_seconds, 0),
 		       COALESCE(schedule_trigger.cron, ''), COALESCE(schedule_trigger.timezone, '')
 		FROM automations automation
@@ -634,7 +655,7 @@ func (s *Store) UpdateAutomation(
 		&currentVersion, &enabled, &currentTitle, &currentTitleKey, &currentWorkflowID,
 		&currentContext, &currentTimeout, &currentType, &issueTriggerCount, &pullRequestTriggerCount, &scheduleTriggerCount, &jiraTriggerCount,
 		&currentState, &currentIncludeDrafts,
-		&currentLabels, &currentBaseBranches, &currentJQL, &currentProjectKeys, &currentAssignee,
+		&currentLabels, &currentBaseBranches, &currentJQL, &currentProjectKeys, &currentAssignee, &currentCandidateRepositoryIDs,
 		&currentInterval, &currentCron, &currentTimezone,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -675,6 +696,7 @@ func (s *Store) UpdateAutomation(
 		exactReplay = exactReplay && currentState == value.Trigger.State && currentJQL == value.Trigger.JQL &&
 			currentAssignee == value.Trigger.Assignee &&
 			bytes.Equal(currentProjectKeys, projectKeys) && bytes.Equal(currentLabels, labels) &&
+			bytes.Equal(currentCandidateRepositoryIDs, candidateRepositoryIDs) &&
 			currentInterval == value.Trigger.PollIntervalSeconds
 	} else {
 		exactReplay = exactReplay && currentState == value.Trigger.State &&
@@ -699,6 +721,9 @@ func (s *Store) UpdateAutomation(
 		return protocol.AutomationDetail{}, unavailable(err)
 	}
 	if err := validateAutomationDependencies(ctx, tx, value.WorkflowID, repositoryID, false); err != nil {
+		return protocol.AutomationDetail{}, err
+	}
+	if err := s.validateAutomationCandidateRepositories(ctx, tx, value.Trigger.CandidateRepositoryIDs); err != nil {
 		return protocol.AutomationDetail{}, err
 	}
 	var conflictID string
@@ -749,10 +774,10 @@ func (s *Store) UpdateAutomation(
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE automation_jira_issue_triggers
 			SET state = ?, jql = ?, project_keys_json = ?, assignee = ?, required_labels_json = ?,
-			    poll_interval_seconds = ?
+			    candidate_repository_ids_json = ?, poll_interval_seconds = ?
 			WHERE automation_id = ?
 		`, value.Trigger.State, value.Trigger.JQL, projectKeys, value.Trigger.Assignee, labels,
-			value.Trigger.PollIntervalSeconds, automationID); err != nil {
+			candidateRepositoryIDs, value.Trigger.PollIntervalSeconds, automationID); err != nil {
 			return protocol.AutomationDetail{}, unavailable(err)
 		}
 	} else {

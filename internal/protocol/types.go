@@ -351,13 +351,14 @@ type ScheduleTrigger struct {
 }
 
 type JiraIssueTrigger struct {
-	Type                string   `json:"type"`
-	State               string   `json:"state"`
-	JQL                 string   `json:"jql"`
-	ProjectKeys         []string `json:"project_keys"`
-	Assignee            string   `json:"assignee"`
-	RequiredLabels      []string `json:"required_labels"`
-	PollIntervalSeconds int      `json:"poll_interval_seconds"`
+	Type                     string   `json:"type"`
+	State                    string   `json:"state"`
+	JQL                      string   `json:"jql"`
+	ProjectKeys              []string `json:"project_keys"`
+	Assignee                 string   `json:"assignee"`
+	RequiredLabels           []string `json:"required_labels"`
+	CandidateRepositoryIDs   []string `json:"candidate_repository_ids"`
+	PollIntervalSeconds      int      `json:"poll_interval_seconds"`
 }
 
 // AutomationTrigger is a strict flat tagged union. UnmarshalJSON rejects fields
@@ -374,6 +375,7 @@ type AutomationTrigger struct {
 	JQL                 string
 	ProjectKeys         []string
 	Assignee            string
+	CandidateRepositoryIDs []string
 }
 
 func (trigger *AutomationTrigger) UnmarshalJSON(body []byte) error {
@@ -425,7 +427,8 @@ func (trigger *AutomationTrigger) UnmarshalJSON(body []byte) error {
 		*trigger = AutomationTrigger{
 			Type: value.Type, State: value.State, JQL: value.JQL, ProjectKeys: value.ProjectKeys,
 			Assignee: value.Assignee, RequiredLabels: value.RequiredLabels,
-			PollIntervalSeconds: value.PollIntervalSeconds,
+			CandidateRepositoryIDs: value.CandidateRepositoryIDs,
+			PollIntervalSeconds:    value.PollIntervalSeconds,
 		}
 		return nil
 	default:
@@ -452,7 +455,8 @@ func (trigger AutomationTrigger) MarshalJSON() ([]byte, error) {
 		return json.Marshal(JiraIssueTrigger{
 			Type: trigger.Type, State: trigger.State, JQL: trigger.JQL, ProjectKeys: trigger.ProjectKeys,
 			Assignee: trigger.Assignee, RequiredLabels: trigger.RequiredLabels,
-			PollIntervalSeconds: trigger.PollIntervalSeconds,
+			CandidateRepositoryIDs: trigger.CandidateRepositoryIDs,
+			PollIntervalSeconds:    trigger.PollIntervalSeconds,
 		})
 	default:
 		return nil, fmt.Errorf("unsupported Automation trigger type %q", trigger.Type)
@@ -482,7 +486,8 @@ func (trigger AutomationTrigger) JiraIssue() JiraIssueTrigger {
 	return JiraIssueTrigger{
 		Type: trigger.Type, State: trigger.State, JQL: trigger.JQL, ProjectKeys: trigger.ProjectKeys,
 		Assignee: trigger.Assignee, RequiredLabels: trigger.RequiredLabels,
-		PollIntervalSeconds: trigger.PollIntervalSeconds,
+		CandidateRepositoryIDs: trigger.CandidateRepositoryIDs,
+		PollIntervalSeconds:    trigger.PollIntervalSeconds,
 	}
 }
 
