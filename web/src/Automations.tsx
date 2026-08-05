@@ -177,6 +177,7 @@ export function AutomationDetail({
     queryFn: () => api.automationOccurrences(id),
     refetchInterval: interval,
   });
+  const repositories = useQuery({ queryKey: ["repositories"], queryFn: api.repositories });
   const loadMoreOccurrences = useMutation({
     mutationFn: ({ cursor }: { cursor: string; headCursor: string | null }) => api.automationOccurrences(id, cursor),
     onSuccess: (page, request) => {
@@ -339,7 +340,20 @@ export function AutomationDetail({
                 <div><dt>Issue state</dt><dd>{automation.trigger.state}</dd></div>
                 <div><dt>Assignee</dt><dd>{automation.trigger.assignee === "currentUser()" ? "Assigned to me (currentUser())" : automation.trigger.assignee}</dd></div>
                 <div><dt>Project keys</dt><dd>{automation.trigger.project_keys.join(", ") || "Any"}</dd></div>
-                <div><dt>Candidate repositories</dt><dd>{automation.trigger.candidate_repository_ids.length ? `${automation.trigger.candidate_repository_ids.length} candidate repos` : "None"}</dd></div>
+                <div>
+                  <dt>Candidate repositories</dt>
+                  <dd>
+                    {automation.trigger.candidate_repository_ids.length === 0 ? "None" : (
+                      <ul className="candidate-repo-list">
+                        {automation.trigger.candidate_repository_ids.map((repoID) => (
+                          <li key={repoID} className="mono">
+                            {repositories.data?.find((repo) => repo.id === repoID)?.remote_identity ?? (repositories.isPending ? "Loading…" : repoID)}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </dd>
+                </div>
                 <div><dt>JQL</dt><dd className="mono">{automation.trigger.jql}</dd></div>
               </> : <>
                 <div><dt>{automation.trigger.type === "github_pull_request" ? "Pull request state" : "Issue state"}</dt><dd>{automation.trigger.state}</dd></div>
