@@ -13,6 +13,7 @@ import { WorkersView, WorkerDetail } from "./Workers";
 import { WorkView } from "./Work";
 import { WorkflowDetail, WorkflowsView } from "./Workflows";
 import { AutomationDetail, AutomationsView } from "./Automations";
+import { ThemeToggle } from "./ThemeToggle";
 
 type Route =
   | { page: "overview" }
@@ -220,6 +221,7 @@ export function App() {
             {route.page === "automations" && "Automations"}
             {route.page === "automation" && "Automation detail"}
           </div>
+          <ThemeToggle />
           <button className="button button-primary" onClick={() => openDelegate()}>
             <Plus size={16} /> Delegate task
           </button>

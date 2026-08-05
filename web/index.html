@@ -3,9 +3,23 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#0a0c11" />
+    <meta name="theme-color" content="#0a0a0b" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#f5f6f8" media="(prefers-color-scheme: light)" />
     <meta name="description" content="Factory local control plane" />
     <title>Factory</title>
+    <script>
+      (function () {
+        try {
+          var stored = localStorage.getItem("factory-theme");
+          var theme = stored === "light" || stored === "dark" ? stored : "system";
+          var resolved =
+            theme === "system"
+              ? (window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark")
+              : theme;
+          document.documentElement.setAttribute("data-theme", resolved);
+        } catch (e) {}
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

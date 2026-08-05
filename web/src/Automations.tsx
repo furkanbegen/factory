@@ -33,6 +33,7 @@ import {
   ErrorState,
   InlineError,
   LoadingState,
+  MultiSelectField,
   PanelHeading,
   StaleBanner,
   ViewHeader,
@@ -918,21 +919,15 @@ function AutomationForm({
                 <code className="jql-preview">{buildJqlPreview(jiraProjectKeys, jiraAssignee, jiraLabels, jiraState)}</code>
               </Field>
               <Field label="Candidate repositories" htmlFor={candidateReposID} error={errors.candidates} hint="Optional · up to 5 · the agent gets one worktree per candidate and edits only what the request needs.">
-                <div id={candidateReposID} className="delegate-repo-set">
-                  {candidateRepoItems.length === 0
-                    ? <span className="field-hint">{repositories.isPending ? "Loading managed repositories…" : "No other enabled managed repositories."}</span>
-                    : candidateRepoItems.map((repo) => (
-                      <label className="confirmation-check" key={repo.id}>
-                        <input
-                          type="checkbox"
-                          checked={jiraCandidateRepos.includes(repo.id)}
-                          onChange={(event) => setJiraCandidateRepos((current) =>
-                            event.target.checked ? [...current, repo.id] : current.filter((id) => id !== repo.id))}
-                        />
-                        {repo.remote_identity}
-                      </label>
-                    ))}
-                </div>
+                <MultiSelectField
+                  id={candidateReposID}
+                  values={candidateRepoItems.map((repo) => ({ id: repo.id, label: repo.remote_identity }))}
+                  selected={jiraCandidateRepos}
+                  onChange={setJiraCandidateRepos}
+                  placeholder={repositories.isPending ? "Loading managed repositories…" : "None selected"}
+                  emptyLabel="No other enabled managed repositories."
+                  disabled={repositories.isPending || candidateRepoItems.length === 0}
+                />
               </Field>
             </> : <>
               <Field label="Required labels" htmlFor={labelsID} error={errors.labels} hint="Comma separated · up to 20">

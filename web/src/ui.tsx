@@ -1,10 +1,12 @@
 import {
   AlertCircle,
+  Check,
+  ChevronDown,
   LoaderCircle,
   RefreshCw,
   XCircle,
 } from "lucide-react";
-import type { ReactNode } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import { APIError } from "./api";
 import { stateLabel, timeAgo } from "./format";
 
@@ -77,6 +79,88 @@ export function StaleBanner({ error }: { error: Error }) {
 export function InlineError({ error }: { error: Error | null }) {
   if (!error) return null;
   return <div className="inline-error" role="alert"><AlertCircle size={16} /> {errorMessage(error)}</div>;
+}
+
+export function MultiSelectField({
+  id,
+  values,
+  selected,
+  onChange,
+  placeholder,
+  emptyLabel,
+  disabled,
+}: {
+  id: string;
+  values: { id: string; label: string }[];
+  selected: string[];
+  onChange: (next: string[]) => void;
+  placeholder: string;
+  emptyLabel?: string;
+  disabled?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const selectedSet = new Set(selected);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDocClick = (event: MouseEvent) => {
+      if (rootRef.current && !rootRef.current.contains(event.target as Node)) setOpen(false);
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onDocClick);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDocClick);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  const toggle = (id: string, checked: boolean) => {
+    onChange(checked ? [...selected, id] : selected.filter((value) => value !== id));
+  };
+
+  const summary = selected.length === 0
+    ? placeholder
+    : selected.length === 1
+      ? values.find((value) => value.id === selected[0])?.label ?? "1 selected"
+      : `${selected.length} selected`;
+
+  return (
+    <div className="multiselect" ref={rootRef}>
+      <button
+        id={id}
+        type="button"
+        className="multiselect-trigger"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        disabled={disabled || values.length === 0}
+        onClick={() => setOpen((value) => !value)}
+      >
+        <span className={selected.length === 0 ? "multiselect-placeholder" : ""}>{summary}</span>
+        <ChevronDown size={16} />
+      </button>
+      {open && (
+        <div className="multiselect-menu" role="listbox" aria-multiselectable="true">
+          {values.length === 0
+            ? <span className="field-hint">{emptyLabel ?? "Nothing to choose from."}</span>
+            : values.map((value) => (
+              <label className="multiselect-option" key={value.id}>
+                <input
+                  type="checkbox"
+                  checked={selectedSet.has(value.id)}
+                  onChange={(event) => toggle(value.id, event.target.checked)}
+                />
+                <span>{value.label}</span>
+                {selectedSet.has(value.id) && <Check size={14} className="multiselect-check" />}
+              </label>
+            ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function errorMessage(error: Error | null): string {

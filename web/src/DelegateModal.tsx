@@ -12,7 +12,7 @@ import { api } from "./api";
 import { invalidateControlPlane } from "./controlPlaneQueries";
 import { runtimeLabel } from "./format";
 import type { CreateTaskInput, Worker } from "./types";
-import { InlineError } from "./ui";
+import { InlineError, MultiSelectField } from "./ui";
 
 export function DelegateModal({
   workers,
@@ -208,21 +208,15 @@ export function DelegateModal({
               </select>
             </Field>
             <Field label="Additional repositories" htmlFor="delegate-additional" error={errors.additional} hint="Optional · up to 5 · chosen from the enabled managed catalog. The worker clones each on demand and the agent gets one worktree per repository.">
-              <div id="delegate-additional" className="delegate-repo-set">
-                {managedRepositories.isPending ? <span className="field-hint">Loading managed repositories…</span> : additionalRepositories.length === 0 ? <span className="field-hint">{managedRepositories.error ? "Failed to load the managed catalog." : repositoryID ? "No other enabled managed repositories." : "Choose a primary repository first."}</span> : additionalRepositories.map((repo) => (
-                  <label className="confirmation-check" key={repo.id}>
-                    <input
-                      type="checkbox"
-                      checked={additionalRepositoryIDs.includes(repo.id)}
-                      onChange={(event) => setAdditionalRepositoryIDs((current) =>
-                        event.target.checked
-                          ? [...current, repo.id]
-                          : current.filter((id) => id !== repo.id))}
-                    />
-                    {repo.remote_identity}
-                  </label>
-                ))}
-              </div>
+              <MultiSelectField
+                id="delegate-additional"
+                values={additionalRepositories.map((repo) => ({ id: repo.id, label: repo.remote_identity }))}
+                selected={additionalRepositoryIDs}
+                onChange={setAdditionalRepositoryIDs}
+                placeholder={managedRepositories.isPending ? "Loading managed repositories…" : workerID ? "None selected" : "Choose a worker first"}
+                emptyLabel={managedRepositories.error ? "Failed to load the managed catalog." : repositoryID ? "No other enabled managed repositories." : "Choose a primary repository first."}
+                disabled={managedRepositories.isPending || additionalRepositories.length === 0}
+              />
             </Field>
             <Field label="Timeout" htmlFor="delegate-timeout" error={errors.timeout}>
               <select id="delegate-timeout" value={timeout} onChange={(event) => setTimeout(event.target.value)}>
