@@ -172,10 +172,12 @@ export function WorkerDetail({
             <span className={data.health === "healthy" ? "healthy-text" : "danger-text"}>{stateLabel(data.health)}</span>
           </div>
           <h1>{data.name}</h1>
-          <span className={`runtime-badge runtime-${data.runtime}`}>
-            <Play size={10} /> {runtimeLabel(data.runtime)}
-          </span>
-          {runtimeSpec(data) && <span className="runtime-badge">{runtimeSpec(data)}</span>}
+          <div className="runtime-badge-row">
+            <span className={`runtime-badge runtime-${data.runtime}`}>
+              <Play size={10} /> {runtimeLabel(data.runtime)}
+            </span>
+            {runtimeSpec(data) && <span className="runtime-badge">{runtimeSpec(data)}</span>}
+          </div>
           <p>Registered {new Date(data.registered_at).toLocaleString()}</p>
           </div>
         </div>

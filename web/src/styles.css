@@ -638,6 +638,9 @@ button { color: inherit; }
 }
 .runtime-badge svg { color: var(--fg-3); }
 
+.runtime-badge-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 4px; }
+.runtime-badge-row .runtime-badge { margin-top: 0; }
+
 .presence { flex: none; width: 6px; height: 6px; border-radius: 50%; }
 .presence.online { background: var(--succeeded); }
 .presence.offline { background: var(--fg-3); }
