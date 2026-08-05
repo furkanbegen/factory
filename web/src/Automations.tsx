@@ -766,7 +766,6 @@ function AutomationForm({
         ? null
         : jiraAssignee.match(/["'\\()[\]]/);
       if (unsafe) nextErrors.assignee = "Assignee must not contain quotes, backslashes, or parentheses (except currentUser()).";
-      if (jiraCandidateRepos.length > 5) nextErrors.candidates = "Use at most 5 candidate repositories.";
     }
     if (!isSchedule && (!Number.isInteger(pollInterval) || pollInterval < 10 || pollInterval > 86_400)) nextErrors.interval = "Use 10 to 86,400 seconds.";
     if (isSchedule && cron.split(" ").length !== 5) nextErrors.cron = "Enter exactly five cron fields, with no seconds field.";
@@ -932,7 +931,7 @@ function AutomationForm({
               <Field label="JQL preview" htmlFor={contextID} hint="Composed from the fields above. No free-form JQL is accepted.">
                 <code className="jql-preview">{buildJqlPreview(jiraProjectKeys, jiraAssignee, jiraLabels, jiraState)}</code>
               </Field>
-              <Field label="Candidate repositories" htmlFor={candidateReposID} error={errors.candidates} hint="Optional · up to 5 · the agent gets one worktree per candidate and edits only what the request needs.">
+              <Field label="Candidate repositories" htmlFor={candidateReposID} error={errors.candidates} hint="Optional · the agent gets one worktree per candidate and edits only what the request needs.">
                 <MultiSelectField
                   id={candidateReposID}
                   values={candidateRepoItems.map((repo) => ({ id: repo.id, label: repo.remote_identity }))}

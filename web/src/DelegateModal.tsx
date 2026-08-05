@@ -98,7 +98,6 @@ export function DelegateModal({
     if (!context.trim()) nextErrors.description = "Enter task context.";
     if (!workerID) nextErrors.worker = "Choose a worker.";
     if (!repositoryID) nextErrors.repository = "Choose a repository.";
-    if (additionalRepositoryIDs.length > 5) nextErrors.additional = "Use at most 5 additional repositories.";
     if (additionalRepositoryIDs.includes(repositoryID)) nextErrors.additional = "The primary repository is already in the set.";
     const timeoutSeconds = Number(timeout);
     if (!Number.isInteger(timeoutSeconds) || timeoutSeconds < 1 || timeoutSeconds > 28_800) {
@@ -207,7 +206,7 @@ export function DelegateModal({
                 {repositories.map((repo) => <option key={repo.id} value={repo.id}>{repo.key} · {repo.remote_identity}</option>)}
               </select>
             </Field>
-            <Field label="Additional repositories" htmlFor="delegate-additional" error={errors.additional} hint="Optional · up to 5 · chosen from the enabled managed catalog. The worker clones each on demand and the agent gets one worktree per repository.">
+            <Field label="Additional repositories" htmlFor="delegate-additional" error={errors.additional} hint="Optional · chosen from the enabled managed catalog. The worker clones each on demand and the agent gets one worktree per repository.">
               <MultiSelectField
                 id="delegate-additional"
                 values={additionalRepositories.map((repo) => ({ id: repo.id, label: repo.remote_identity }))}

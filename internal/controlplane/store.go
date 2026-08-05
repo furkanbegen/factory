@@ -1478,10 +1478,6 @@ func normalizeCandidateRepositoryIDs(ids []string) ([]string, error) {
 		seen[id] = true
 		normalized = append(normalized, id)
 	}
-	if len(normalized) > protocol.MaxRepositorySetSize-1 {
-		return nil, fmt.Errorf(
-			"candidate_repository_ids may contain at most %d repositories", protocol.MaxRepositorySetSize-1)
-	}
 	sort.Strings(normalized)
 	return normalized, nil
 }
@@ -1528,12 +1524,6 @@ func normalizeRepositorySetIDs(primaryID string, ids []string) ([]string, error)
 		}
 		seen[id] = true
 		normalized = append(normalized, id)
-	}
-	if len(normalized) > protocol.MaxRepositorySetSize-1 {
-		return nil, invalid(
-			"invalid_repository_set",
-			fmt.Sprintf("repository_set_ids may contain at most %d additional repositories", protocol.MaxRepositorySetSize-1),
-		)
 	}
 	sort.Strings(normalized)
 	return normalized, nil

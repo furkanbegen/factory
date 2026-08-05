@@ -242,9 +242,6 @@ func prepareAttemptWorktrees(
 	if len(repositories) == 0 {
 		return preparedAttempt{}, errors.New("attempt has no repository")
 	}
-	if len(repositories) > protocol.MaxRepositorySetSize {
-		return preparedAttempt{}, errors.New("attempt repository set exceeds the supported size")
-	}
 	if len(repositories) == 1 {
 		value, err := prepareWorktree(ctx, gitExecutable, worktreeRoot, repositories[0], taskID, attemptID)
 		if err != nil {
@@ -415,9 +412,6 @@ func (manager *Manager) validateClaim(claim protocol.Claim) error {
 	}
 	if claim.Task.RepositoryID != claim.Repository.ID {
 		return errors.New("claim repository IDs do not match")
-	}
-	if len(claim.AdditionalRepositories) > protocol.MaxRepositorySetSize-1 {
-		return errors.New("claim repository set exceeds the supported size")
 	}
 	seen := map[string]bool{claim.Repository.ID: true}
 	for _, repository := range claim.AdditionalRepositories {

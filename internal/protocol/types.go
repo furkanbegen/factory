@@ -41,7 +41,6 @@ const (
 	MaxAutomationOccurrences  = 100000
 	MaxAutomationContextBytes = 8 << 10
 	MaxAutomationMatches      = 100
-	MaxRepositorySetSize      = 6
 )
 
 func SupportedRuntime(value string) bool {
