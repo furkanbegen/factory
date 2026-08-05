@@ -747,8 +747,10 @@ function AutomationForm({
     if (isJira) {
       const projectKeys = jiraProjectKeys.split(",").map((key) => key.trim().toUpperCase()).filter(Boolean);
       if (projectKeys.length > 20 || projectKeys.some((key) => new TextEncoder().encode(key).length > 32)) nextErrors.projects = "Use at most 20 project keys of 32 bytes each.";
-      const unsafe = jiraAssignee.match(/["'\\()[\]]/);
-      if (unsafe) nextErrors.assignee = "Assignee must not contain quotes, backslashes, or parentheses.";
+      const unsafe = jiraAssignee.trim().toLowerCase() === "currentuser()"
+        ? null
+        : jiraAssignee.match(/["'\\()[\]]/);
+      if (unsafe) nextErrors.assignee = "Assignee must not contain quotes, backslashes, or parentheses (except currentUser()).";
       if (jiraCandidateRepos.length > 5) nextErrors.candidates = "Use at most 5 candidate repositories.";
     }
     if (!isSchedule && (!Number.isInteger(pollInterval) || pollInterval < 10 || pollInterval > 86_400)) nextErrors.interval = "Use 10 to 86,400 seconds.";
