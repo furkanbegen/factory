@@ -575,7 +575,7 @@ button { color: inherit; }
 }
 .worker-table-head, .worker-row {
   display: grid;
-  grid-template-columns: minmax(180px, 1.3fr) minmax(110px, .6fr) minmax(170px, 1.1fr) minmax(120px, .7fr) 84px 16px;
+  grid-template-columns: minmax(180px, 1.3fr) minmax(110px, .6fr) minmax(170px, 1.1fr) minmax(120px, .7fr) 84px auto 16px;
   gap: 16px;
   align-items: center;
 }
@@ -597,6 +597,9 @@ button { color: inherit; }
 }
 .worker-row:last-child { border-bottom: 0; }
 .worker-row:hover { background: var(--panel-2); }
+.worker-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.worker-row .worker-action { height: 26px; padding: 0 9px; font-size: 11px; }
+.worker-row .worker-action svg { flex: none; }
 
 .worker-identity { display: flex; gap: 9px; align-items: flex-start; min-width: 0; }
 .worker-identity > span:last-child { min-width: 0; }
@@ -646,7 +649,22 @@ button { color: inherit; }
 .presence.offline { background: var(--fg-3); }
 .healthy-text { color: var(--succeeded); }
 .danger-text { color: var(--failed); }
-.paused-text { color: var(--fg-3); }
+.paused-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border: 1px solid var(--queued);
+  border-radius: 999px;
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--queued);
+  white-space: nowrap;
+  margin-left: 4px;
+}
 
 .capacity-cell {
   display: grid;
@@ -1266,7 +1284,7 @@ button { color: inherit; }
 
 @media (max-width: 1200px) {
   .worker-table-head, .worker-row {
-    grid-template-columns: minmax(170px, 1.2fr) 100px minmax(150px, 1fr) 90px 16px;
+    grid-template-columns: minmax(170px, 1.2fr) 100px minmax(150px, 1fr) 90px auto 16px;
     gap: 12px;
   }
   .worker-table-head span:nth-child(4), .worker-row .versions { display: none; }
@@ -1282,7 +1300,7 @@ button { color: inherit; }
 
 @media (max-width: 980px) {
   .worker-table-head { display: none; }
-  .worker-row { grid-template-columns: minmax(0, 1fr) 80px 16px; gap: 10px; }
+  .worker-row { grid-template-columns: minmax(0, 1fr) 80px auto 16px; gap: 10px; }
   .worker-row .repo-list, .worker-row .versions, .worker-row .last-seen { display: none; }
   .workflow-table-head { display: none; }
   .workflow-row { grid-template-columns: minmax(0, 1fr) 80px 16px; }

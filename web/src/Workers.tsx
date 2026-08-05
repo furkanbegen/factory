@@ -77,10 +77,22 @@ export function WorkersView({
           </div>
           <div className="workers-list">
             <div className="worker-table-head" aria-hidden="true">
-              <span>Worker</span><span>Capacity</span><span>Repositories</span><span>Versions</span><span>Last seen</span><span />
+              <span>Worker</span><span>Capacity</span><span>Repositories</span><span>Versions</span><span>Last seen</span><span /><span />
             </div>
             {registered.map((worker) => (
-              <button className="worker-row" key={worker.id} onClick={() => onWorker(worker.id)}>
+              <div
+                className="worker-row"
+                key={worker.id}
+                role="button"
+                tabIndex={0}
+                onClick={() => onWorker(worker.id)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    onWorker(worker.id);
+                  }
+                }}
+              >
                 <span className="worker-identity">
                   <span className="worker-avatar"><Bot size={17} /></span>
                   <span>
@@ -96,7 +108,7 @@ export function WorkersView({
                       <span className={worker.health === "healthy" ? "healthy-text" : "danger-text"}>
                         {stateLabel(worker.health)}
                       </span>
-                      {!worker.accepting_work && <span className="paused-text"> · Paused</span>}
+                      {!worker.accepting_work && <span className="paused-badge">Paused</span>}
                     </small>
                     {worker.current_task_title && <em>{worker.current_task_title}</em>}
                   </span>
@@ -116,13 +128,45 @@ export function WorkersView({
                   <small>Worker {worker.worker_version || "unknown"}</small>
                 </span>
                 <span className="last-seen">{timeAgo(worker.last_heartbeat)}</span>
+                <WorkerPauseButton worker={worker} />
                 <ChevronRight size={16} className="row-chevron" aria-hidden="true" />
-              </button>
+              </div>
             ))}
           </div>
         </>
       )}
     </div>
+  );
+}
+
+function WorkerPauseButton({ worker }: { worker: Worker }) {
+  const queryClient = useQueryClient();
+  const setAcceptingWork = useMutation({
+    mutationFn: (acceptingWork: boolean) =>
+      api.setWorkerAcceptingWork(worker.id, acceptingWork),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["workers"] });
+      void queryClient.invalidateQueries({ queryKey: ["worker", worker.id] });
+    },
+  });
+  return (
+    <button
+      className="button button-secondary worker-action"
+      disabled={setAcceptingWork.isPending || !worker.online}
+      onClick={(event) => {
+        event.stopPropagation();
+        setAcceptingWork.mutate(!worker.accepting_work);
+      }}
+    >
+      {setAcceptingWork.isPending ? (
+        <LoaderCircle size={14} className="spin" />
+      ) : worker.accepting_work ? (
+        <HardDrive size={14} />
+      ) : (
+        <Play size={14} />
+      )}
+      {worker.accepting_work ? "Pause" : "Resume"}
+    </button>
   );
 }
 
@@ -179,7 +223,7 @@ export function WorkerDetail({
             <span>{data.online ? "Online" : "Offline"}</span>
             <span>·</span>
             <span className={data.health === "healthy" ? "healthy-text" : "danger-text"}>{stateLabel(data.health)}</span>
-            {!data.accepting_work && <><span>·</span><span className="paused-text">Paused</span></>}
+            {!data.accepting_work && <span className="paused-badge">Paused</span>}
           </div>
           <h1>{data.name}</h1>
           <div className="runtime-badge-row">
