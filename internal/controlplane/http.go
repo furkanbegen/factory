@@ -73,6 +73,7 @@ func NewHandlerWithAutomation(store *Store, logger *slog.Logger, automations *Au
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", api.health)
 	mux.HandleFunc("PUT /api/v1/workers/{worker_id}", api.registerWorker)
+	mux.HandleFunc("PUT /api/v1/workers/{worker_id}/accepting-work", api.setWorkerAcceptingWork)
 	mux.HandleFunc("POST /api/v1/workers/{worker_id}/claims", api.claim)
 	mux.HandleFunc("GET /api/v1/workers", api.listWorkers)
 	mux.HandleFunc("GET /api/v1/workers/{worker_id}", api.getWorker)
@@ -409,6 +410,22 @@ func (a *API) listWorkers(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) getWorker(w http.ResponseWriter, r *http.Request) {
 	worker, err := a.store.Worker(r.Context(), r.PathValue("worker_id"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, worker)
+}
+
+func (a *API) setWorkerAcceptingWork(w http.ResponseWriter, r *http.Request) {
+	if !prepareMutation(w, r, protocol.MaxBodyBytes) {
+		return
+	}
+	var input protocol.SetWorkerAcceptingWorkRequest
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	worker, err := a.store.SetWorkerAcceptingWork(r.Context(), r.PathValue("worker_id"), input.AcceptingWork)
 	if err != nil {
 		writeError(w, err)
 		return

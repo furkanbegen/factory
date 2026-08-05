@@ -28,6 +28,7 @@ export interface Worker {
   active_count: number;
   health: "healthy" | "unhealthy";
   online: boolean;
+  accepting_work: boolean;
   repositories: Repository[];
   source_access?: Array<{ provider: string; hostname: string }>;
   accepts_managed_repositories?: boolean;

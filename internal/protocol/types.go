@@ -122,6 +122,10 @@ type SetManagedRepositoryEnabledRequest struct {
 	Enabled bool `json:"enabled"`
 }
 
+type SetWorkerAcceptingWorkRequest struct {
+	AcceptingWork bool `json:"accepting_work"`
+}
+
 type Worker struct {
 	ID                         string             `json:"id"`
 	Name                       string             `json:"name"`
@@ -134,6 +138,7 @@ type Worker struct {
 	ActiveCount                int                `json:"active_count"`
 	Health                     string             `json:"health"`
 	Online                     bool               `json:"online"`
+	AcceptingWork              bool               `json:"accepting_work"`
 	Repositories               []Repository       `json:"repositories"`
 	SourceAccess               []SourceAccess     `json:"source_access,omitempty"`
 	AcceptsManagedRepositories bool               `json:"accepts_managed_repositories,omitempty"`
@@ -350,30 +355,30 @@ type ScheduleTrigger struct {
 }
 
 type JiraIssueTrigger struct {
-	Type                     string   `json:"type"`
-	State                    string   `json:"state"`
-	JQL                      string   `json:"jql"`
-	ProjectKeys              []string `json:"project_keys"`
-	Assignee                 string   `json:"assignee"`
-	RequiredLabels           []string `json:"required_labels"`
-	CandidateRepositoryIDs   []string `json:"candidate_repository_ids"`
-	PollIntervalSeconds      int      `json:"poll_interval_seconds"`
+	Type                   string   `json:"type"`
+	State                  string   `json:"state"`
+	JQL                    string   `json:"jql"`
+	ProjectKeys            []string `json:"project_keys"`
+	Assignee               string   `json:"assignee"`
+	RequiredLabels         []string `json:"required_labels"`
+	CandidateRepositoryIDs []string `json:"candidate_repository_ids"`
+	PollIntervalSeconds    int      `json:"poll_interval_seconds"`
 }
 
 // AutomationTrigger is a strict flat tagged union. UnmarshalJSON rejects fields
 // that do not belong to the selected concrete trigger type.
 type AutomationTrigger struct {
-	Type                string
-	State               string
-	IncludeDrafts       bool
-	RequiredLabels      []string
-	BaseBranches        []string
-	PollIntervalSeconds int
-	Cron                string
-	Timezone            string
-	JQL                 string
-	ProjectKeys         []string
-	Assignee            string
+	Type                   string
+	State                  string
+	IncludeDrafts          bool
+	RequiredLabels         []string
+	BaseBranches           []string
+	PollIntervalSeconds    int
+	Cron                   string
+	Timezone               string
+	JQL                    string
+	ProjectKeys            []string
+	Assignee               string
 	CandidateRepositoryIDs []string
 }
 

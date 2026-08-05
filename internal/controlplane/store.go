@@ -1301,7 +1301,7 @@ func (s *Store) Workers(ctx context.Context) ([]protocol.Worker, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT w.id, w.name, w.worker_version, w.runtime, w.runtime_version,
 		       w.agent, w.model,
-		       w.capacity, w.active_count, w.health, w.source_access_json,
+		       w.capacity, w.active_count, w.health, w.accepting_work, w.source_access_json,
 		       w.accepts_managed_repositories, w.managed_repository_ids_json,
 		       w.retained_worktrees_json,
 		       w.registered_at, w.last_heartbeat,
@@ -1342,11 +1342,32 @@ func (s *Store) Workers(ctx context.Context) ([]protocol.Worker, error) {
 	return workers, nil
 }
 
+func (s *Store) SetWorkerAcceptingWork(
+	ctx context.Context,
+	workerID string,
+	acceptingWork bool,
+) (protocol.Worker, error) {
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE workers SET accepting_work = ? WHERE id = ?
+	`, boolInt(acceptingWork), strings.TrimSpace(workerID))
+	if err != nil {
+		return protocol.Worker{}, unavailable(err)
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return protocol.Worker{}, unavailable(err)
+	}
+	if changed != 1 {
+		return protocol.Worker{}, ErrNotFound
+	}
+	return s.Worker(ctx, workerID)
+}
+
 func (s *Store) Worker(ctx context.Context, id string) (protocol.Worker, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT w.id, w.name, w.worker_version, w.runtime, w.runtime_version,
 		       w.agent, w.model,
-		       w.capacity, w.active_count, w.health, w.source_access_json,
+		       w.capacity, w.active_count, w.health, w.accepting_work, w.source_access_json,
 		       w.accepts_managed_repositories, w.managed_repository_ids_json,
 		       w.retained_worktrees_json,
 		       w.registered_at, w.last_heartbeat,
@@ -1377,11 +1398,11 @@ type scanner interface {
 func scanWorker(row scanner, now time.Time) (protocol.Worker, error) {
 	var worker protocol.Worker
 	var sourceAccess, managedRepositoryIDs, retained []byte
-	var acceptsManagedRepositories int
+	var acceptsManagedRepositories, acceptingWork int
 	var registered, heartbeat int64
 	if err := row.Scan(&worker.ID, &worker.Name, &worker.WorkerVersion, &worker.Runtime, &worker.RuntimeVersion,
 		&worker.Agent, &worker.Model,
-		&worker.Capacity, &worker.ActiveCount, &worker.Health, &sourceAccess,
+		&worker.Capacity, &worker.ActiveCount, &worker.Health, &acceptingWork, &sourceAccess,
 		&acceptsManagedRepositories, &managedRepositoryIDs,
 		&retained, &registered, &heartbeat,
 		&worker.CurrentTaskTitle); err != nil {
@@ -1391,6 +1412,7 @@ func scanWorker(row scanner, now time.Time) (protocol.Worker, error) {
 		return worker, err
 	}
 	worker.AcceptsManagedRepositories = acceptsManagedRepositories != 0
+	worker.AcceptingWork = acceptingWork != 0
 	var repositoryIDs []string
 	if err := json.Unmarshal(managedRepositoryIDs, &repositoryIDs); err != nil {
 		return worker, err
@@ -1593,6 +1615,7 @@ func (s *Store) selectTaskRouteWithSourceRequirement(
 		  ON wr.worker_id = w.id AND wr.repository_id = ?
 		WHERE w.health = 'healthy'
 		  AND w.last_heartbeat >= ?
+		  AND w.accepting_work = 1
 		  AND (
 		      COALESCE(wr.advertised, 0) = 1
 		      OR NOT EXISTS (
@@ -1957,17 +1980,21 @@ func (s *Store) CreateTask(ctx context.Context, input protocol.CreateTaskRequest
 		input.RepositoryID = selection.repositoryID
 		runtime = selection.runtime
 	} else {
+		var acceptingWork int
 		err = tx.QueryRowContext(ctx, `
-			SELECT w.runtime
+			SELECT w.runtime, w.accepting_work
 			FROM workers w
 			JOIN worker_repositories wr ON wr.worker_id = w.id
 			WHERE w.id = ? AND wr.repository_id = ? AND wr.advertised = 1
-		`, input.WorkerID, input.RepositoryID).Scan(&runtime)
+		`, input.WorkerID, input.RepositoryID).Scan(&runtime, &acceptingWork)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return protocol.TaskDetail{}, false, unavailable(err)
 		}
 		if errors.Is(err, sql.ErrNoRows) {
 			return protocol.TaskDetail{}, false, invalid("repository_not_advertised", "repository is not advertised by the assigned worker")
+		}
+		if acceptingWork == 0 {
+			return protocol.TaskDetail{}, false, conflict("worker_paused", "the assigned worker is paused and not accepting new work")
 		}
 	}
 	var repositoryRemoteIdentity string

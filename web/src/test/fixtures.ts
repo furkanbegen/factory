@@ -11,6 +11,7 @@ export const worker: Worker = {
   active_count: 1,
   health: "healthy",
   online: true,
+  accepting_work: true,
   source_access: [{ provider: "github", hostname: "github.com" }],
   accepts_managed_repositories: true,
   repository_cache_count: 1,

@@ -11,7 +11,7 @@ import {
   Plus,
   Server,
 } from "lucide-react";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { api } from "./api";
 import { runtimeLabel, runtimeSpec, stateLabel, timeAgo } from "./format";
@@ -96,6 +96,7 @@ export function WorkersView({
                       <span className={worker.health === "healthy" ? "healthy-text" : "danger-text"}>
                         {stateLabel(worker.health)}
                       </span>
+                      {!worker.accepting_work && <span className="paused-text"> · Paused</span>}
                     </small>
                     {worker.current_task_title && <em>{worker.current_task_title}</em>}
                   </span>
@@ -135,10 +136,18 @@ export function WorkerDetail({
   onDelegate: () => void;
 }) {
   const interval = useVisibleInterval(10_000);
+  const queryClient = useQueryClient();
   const worker = useQuery({
     queryKey: ["worker", id],
     queryFn: () => api.worker(id),
     refetchInterval: interval,
+  });
+  const setAcceptingWork = useMutation({
+    mutationFn: (acceptingWork: boolean) => api.setWorkerAcceptingWork(id, acceptingWork),
+    onSuccess: (next) => {
+      queryClient.setQueryData(["worker", id], next);
+      void queryClient.invalidateQueries({ queryKey: ["workers"] });
+    },
   });
   const [copied, setCopied] = useState<string>();
 
@@ -170,6 +179,7 @@ export function WorkerDetail({
             <span>{data.online ? "Online" : "Offline"}</span>
             <span>·</span>
             <span className={data.health === "healthy" ? "healthy-text" : "danger-text"}>{stateLabel(data.health)}</span>
+            {!data.accepting_work && <><span>·</span><span className="paused-text">Paused</span></>}
           </div>
           <h1>{data.name}</h1>
           <div className="runtime-badge-row">
@@ -182,21 +192,41 @@ export function WorkerDetail({
           </div>
         </div>
         <div className="detail-actions">
+          {data.accepting_work ? (
+            <button
+              className="button button-secondary"
+              disabled={setAcceptingWork.isPending}
+              onClick={() => setAcceptingWork.mutate(false)}
+            >
+              {setAcceptingWork.isPending ? <LoaderCircle size={15} className="spin" /> : <HardDrive size={15} />} Pause accepting work
+            </button>
+          ) : (
+            <button
+              className="button button-primary"
+              disabled={setAcceptingWork.isPending}
+              onClick={() => setAcceptingWork.mutate(true)}
+            >
+              {setAcceptingWork.isPending ? <LoaderCircle size={15} className="spin" /> : <Play size={15} />} Resume accepting work
+            </button>
+          )}
           <button className="button button-primary" onClick={onDelegate}>
             <Plus size={15} /> Assign work
           </button>
         </div>
       </div>
       {worker.error && <StaleBanner error={worker.error} />}
+      {setAcceptingWork.error && <StaleBanner error={setAcceptingWork.error} />}
 
       <div className="worker-detail-layout">
         <div>
           <section className="panel">
-            <PanelHeading title="Now" aside={data.current_task_title ? "1 active task" : "No active work"} />
+            <PanelHeading title="Now" aside={data.current_task_title ? "1 active task" : data.accepting_work ? "Idle" : "Paused"} />
             {data.current_task_title ? (
               <div className="current-work"><LoaderCircle size={17} className="spin" /> {data.current_task_title}</div>
-            ) : (
+            ) : data.accepting_work ? (
               <div className="quiet-empty">This worker is ready for its next task.</div>
+            ) : (
+              <div className="quiet-empty">Paused — not accepting new work until resumed.</div>
             )}
           </section>
 

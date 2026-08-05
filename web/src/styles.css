@@ -646,6 +646,7 @@ button { color: inherit; }
 .presence.offline { background: var(--fg-3); }
 .healthy-text { color: var(--succeeded); }
 .danger-text { color: var(--failed); }
+.paused-text { color: var(--fg-3); }
 
 .capacity-cell {
   display: grid;

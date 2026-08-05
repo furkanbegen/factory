@@ -72,12 +72,12 @@ func (s *Store) Claim(ctx context.Context, workerID string, input protocol.Claim
 		return nil, unavailable(err)
 	}
 
-	var capacity, healthy int
+	var capacity, healthy, acceptingWork int
 	var runtime string
 	var lastHeartbeat int64
 	err = tx.QueryRowContext(ctx, `
-		SELECT capacity, health = 'healthy', last_heartbeat, runtime FROM workers WHERE id = ?
-	`, workerID).Scan(&capacity, &healthy, &lastHeartbeat, &runtime)
+		SELECT capacity, health = 'healthy', last_heartbeat, runtime, accepting_work FROM workers WHERE id = ?
+	`, workerID).Scan(&capacity, &healthy, &lastHeartbeat, &runtime, &acceptingWork)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -91,7 +91,7 @@ func (s *Store) Claim(ctx context.Context, workerID string, input protocol.Claim
 	`, workerID).Scan(&active); err != nil {
 		return nil, unavailable(err)
 	}
-	if healthy == 0 || now.Sub(fromMillis(lastHeartbeat)) > protocol.WorkerOnlineWindow || active >= capacity {
+	if healthy == 0 || acceptingWork == 0 || now.Sub(fromMillis(lastHeartbeat)) > protocol.WorkerOnlineWindow || active >= capacity {
 		if err := insertEmptyClaim(ctx, tx, workerID, input.RequestID, digest, nowMillis); err != nil {
 			return nil, err
 		}
@@ -696,6 +696,13 @@ func (s *Store) RetryExecution(ctx context.Context, executionID string) (protoco
 	}
 	if state != "failed" && state != "cancelled" {
 		return protocol.TaskDetail{}, conflict("retry_not_allowed", "only a failed or cancelled execution can be retried")
+	}
+	var workerAcceptingWork int
+	if err := tx.QueryRowContext(ctx, `SELECT accepting_work FROM workers WHERE id = ?`, workerID).Scan(&workerAcceptingWork); err != nil {
+		return protocol.TaskDetail{}, unavailable(err)
+	}
+	if workerAcceptingWork == 0 {
+		return protocol.TaskDetail{}, conflict("worker_paused", "the assigned worker is paused and not accepting new work")
 	}
 	var dynamic, advertised int
 	if err := tx.QueryRowContext(ctx, `

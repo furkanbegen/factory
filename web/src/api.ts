@@ -84,6 +84,11 @@ export const api = {
       .map(normalizeWorker),
   worker: async (id: string) =>
     normalizeWorker(await request<Worker>(`/api/v1/workers/${encodeURIComponent(id)}`)),
+  setWorkerAcceptingWork: (id: string, acceptingWork: boolean) =>
+    request<Worker>(`/api/v1/workers/${encodeURIComponent(id)}/accepting-work`, {
+      method: "PUT",
+      body: JSON.stringify({ accepting_work: acceptingWork }),
+    }),
   repositories: async () =>
     (await request<{ repositories: ManagedRepository[] | null }>("/api/v1/repositories"))
       .repositories ?? [],
