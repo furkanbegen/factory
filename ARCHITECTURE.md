@@ -11,8 +11,9 @@ Factory is a local control plane for running coding agents in Git repositories.
 It separates durable coordination from agent execution:
 
 - `factory-server` stores work, assigns it, evaluates typed GitHub issue and
-  pull-request Automations through `gh`, admits schedule Automations from its
-  clock, exposes the HTTP API, and serves the embedded browser UI.
+  pull-request Automations through `gh`, Jira issue Automations through `acli`,
+  admits schedule Automations from its clock, exposes the HTTP API, and serves
+  the embedded browser UI.
 - `factory-worker` has one stable identity and one agent runtime. It advertises
   runtime capacity and provider access, acquires centrally managed repositories
   on demand, and runs attempts in isolated Git worktrees.
@@ -84,9 +85,9 @@ the system does not use WebSockets.
 12. Tasks snapshot their Workflow title, revision, context, and resolved prompt.
     Workers remain generic and receive the resolved prompt through the existing
     claim task description.
-13. A typed Automation is created disabled. One issue, pull request, scheduled
-    UTC instant, or idempotent Run now key creates at most one durable
-    Occurrence and one ordinary Task per Automation.
+13. A typed Automation is created disabled. One issue, pull request, Jira
+    issue, scheduled UTC instant, or idempotent Run now key creates at most one
+    durable Occurrence and one ordinary Task per Automation.
 
 ## 4. Components and dependencies
 
@@ -102,8 +103,8 @@ the system does not use WebSockets.
 - allows ten seconds for HTTP shutdown.
 
 `internal/controlplane` owns the API, validation, state transitions, scheduling,
-metrics, pagination, Workflow revisions, typed GitHub and schedule Automations,
-provider health, prompt composition, and persistence.
+metrics, pagination, Workflow revisions, typed GitHub, Jira, and schedule
+Automations, provider health, prompt composition, and persistence.
 Claim selection is transactional and FIFO by execution creation time for the
 requesting worker.
 
@@ -423,9 +424,9 @@ Task     1 --- 1 Execution       1 --- * Attempt 1 --- * AttemptEvent
   snapshot, and its exact resolved prompt in the existing description field.
 - A repository is the central fleet record. Its enabled flag gates new routed
   work but does not rewrite existing assignments.
-- An Automation stores one concrete `github_issue`, `github_pull_request`, or
-  `schedule` Trigger, health and polling or due cursor, counters, and
-  disabled-first state. Its
+- An Automation stores one concrete `github_issue`, `github_pull_request`,
+  `jira_issue`, or `schedule` Trigger, health and polling or due cursor,
+  counters, and disabled-first state. Its
   Occurrences snapshot the Workflow revision, repository, predicate,
   observation, prompt, and deterministic Task request key before dispatch.
 - Automation and Occurrence collection APIs use opaque descending cursors, so
@@ -537,8 +538,8 @@ The current trust boundary is one trusted user on one host:
   arbitrary URL supplied by a ticket. This is not a filesystem sandbox;
 - provider CLIs own their credentials; Factory does not request, store, or pass
   provider tokens;
-- the control-plane evaluator invokes the local authenticated `gh` executable
-  with fixed arguments and stores no GitHub token;
+- the control-plane evaluator invokes the local authenticated `gh` or `acli`
+  executable with fixed arguments and stores no provider token;
 - workers advertise GitHub source access and managed acquisition only after a
   successful local `gh auth status` probe; registrations contain no token;
 - Workflow instructions and Automation predicates are trusted operator policy;
@@ -630,8 +631,9 @@ The contributor check set is documented in [CONTRIBUTING.md](CONTRIBUTING.md).
   rescheduling are not implemented.
 - Execution scheduling is pull-based FIFO per worker. There are no priorities
   or automatic task retries.
-- GitHub is the only provider implemented for typed provider Automations. Jira,
-  Linear, generic provider plugins, and command adapters are not implemented.
+- GitHub and Jira are the implemented providers for typed provider Automations
+  (`gh` and `acli` respectively). Linear, generic provider plugins, and command
+  adapters are not implemented.
 - Legacy poller command queues are reviewed in Preview and preserved in the
   archive, but are not imported. Provider items do not automatically rearm.
 - A unified `factory` CLI is proposed but not implemented.

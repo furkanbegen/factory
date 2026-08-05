@@ -319,6 +319,7 @@ const (
 	AutomationTriggerGitHubIssue       = "github_issue"
 	AutomationTriggerGitHubPullRequest = "github_pull_request"
 	AutomationTriggerSchedule          = "schedule"
+	AutomationTriggerJiraIssue         = "jira_issue"
 )
 
 type GitHubIssueTrigger struct {
@@ -343,6 +344,16 @@ type ScheduleTrigger struct {
 	Timezone string `json:"timezone"`
 }
 
+type JiraIssueTrigger struct {
+	Type                string   `json:"type"`
+	State               string   `json:"state"`
+	JQL                 string   `json:"jql"`
+	ProjectKeys         []string `json:"project_keys"`
+	Assignee            string   `json:"assignee"`
+	RequiredLabels      []string `json:"required_labels"`
+	PollIntervalSeconds int      `json:"poll_interval_seconds"`
+}
+
 // AutomationTrigger is a strict flat tagged union. UnmarshalJSON rejects fields
 // that do not belong to the selected concrete trigger type.
 type AutomationTrigger struct {
@@ -354,6 +365,9 @@ type AutomationTrigger struct {
 	PollIntervalSeconds int
 	Cron                string
 	Timezone            string
+	JQL                 string
+	ProjectKeys         []string
+	Assignee            string
 }
 
 func (trigger *AutomationTrigger) UnmarshalJSON(body []byte) error {
@@ -397,6 +411,17 @@ func (trigger *AutomationTrigger) UnmarshalJSON(body []byte) error {
 		}
 		*trigger = AutomationTrigger{Type: value.Type, Cron: value.Cron, Timezone: value.Timezone}
 		return nil
+	case AutomationTriggerJiraIssue:
+		var value JiraIssueTrigger
+		if err := decode(&value); err != nil {
+			return err
+		}
+		*trigger = AutomationTrigger{
+			Type: value.Type, State: value.State, JQL: value.JQL, ProjectKeys: value.ProjectKeys,
+			Assignee: value.Assignee, RequiredLabels: value.RequiredLabels,
+			PollIntervalSeconds: value.PollIntervalSeconds,
+		}
+		return nil
 	default:
 		return fmt.Errorf("unsupported Automation trigger type %q", discriminator.Type)
 	}
@@ -417,6 +442,12 @@ func (trigger AutomationTrigger) MarshalJSON() ([]byte, error) {
 		})
 	case AutomationTriggerSchedule:
 		return json.Marshal(ScheduleTrigger{Type: trigger.Type, Cron: trigger.Cron, Timezone: trigger.Timezone})
+	case AutomationTriggerJiraIssue:
+		return json.Marshal(JiraIssueTrigger{
+			Type: trigger.Type, State: trigger.State, JQL: trigger.JQL, ProjectKeys: trigger.ProjectKeys,
+			Assignee: trigger.Assignee, RequiredLabels: trigger.RequiredLabels,
+			PollIntervalSeconds: trigger.PollIntervalSeconds,
+		})
 	default:
 		return nil, fmt.Errorf("unsupported Automation trigger type %q", trigger.Type)
 	}
@@ -439,6 +470,14 @@ func (trigger AutomationTrigger) GitHubPullRequest() GitHubPullRequestTrigger {
 
 func (trigger AutomationTrigger) Schedule() ScheduleTrigger {
 	return ScheduleTrigger{Type: trigger.Type, Cron: trigger.Cron, Timezone: trigger.Timezone}
+}
+
+func (trigger AutomationTrigger) JiraIssue() JiraIssueTrigger {
+	return JiraIssueTrigger{
+		Type: trigger.Type, State: trigger.State, JQL: trigger.JQL, ProjectKeys: trigger.ProjectKeys,
+		Assignee: trigger.Assignee, RequiredLabels: trigger.RequiredLabels,
+		PollIntervalSeconds: trigger.PollIntervalSeconds,
+	}
 }
 
 type AutomationHealth struct {
@@ -494,6 +533,10 @@ type AutomationOccurrence struct {
 	ObservedDraft      *bool                  `json:"observed_draft,omitempty"`
 	ObservedBaseBranch string                 `json:"observed_base_branch,omitempty"`
 	ObservedHeadCommit string                 `json:"observed_head_commit,omitempty"`
+	IssueKey           string                 `json:"issue_key,omitempty"`
+	IssueSummary       string                 `json:"issue_summary,omitempty"`
+	IssueDescription   string                 `json:"issue_description,omitempty"`
+	ObservedAssignee   string                 `json:"observed_assignee,omitempty"`
 	Kind               string                 `json:"kind,omitempty"`
 	ScheduledAt        *time.Time             `json:"scheduled_at,omitempty"`
 	RunRequestKey      string                 `json:"run_request_key,omitempty"`
@@ -661,6 +704,16 @@ type GitHubPullRequestMatch struct {
 	Labels     []string `json:"labels"`
 }
 
+type JiraIssueMatch struct {
+	Key         string   `json:"key"`
+	URL         string   `json:"url"`
+	Summary     string   `json:"summary"`
+	Status      string   `json:"status"`
+	Assignee    string   `json:"assignee"`
+	Labels      []string `json:"labels"`
+	Description string   `json:"description,omitempty"`
+}
+
 type AutomationMatch struct {
 	Number     int      `json:"number"`
 	Title      string   `json:"title"`
@@ -670,6 +723,9 @@ type AutomationMatch struct {
 	IsDraft    *bool    `json:"is_draft,omitempty"`
 	BaseBranch string   `json:"base_branch,omitempty"`
 	HeadCommit string   `json:"head_commit,omitempty"`
+	Key        string   `json:"key,omitempty"`
+	Summary    string   `json:"summary,omitempty"`
+	Assignee   string   `json:"assignee,omitempty"`
 }
 
 type TestAutomationResult struct {

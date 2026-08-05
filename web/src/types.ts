@@ -170,7 +170,17 @@ export interface ScheduleTrigger {
 	timezone: string;
 }
 
-export type AutomationTrigger = GitHubIssueTrigger | GitHubPullRequestTrigger | ScheduleTrigger;
+export interface JiraIssueTrigger {
+	type: "jira_issue";
+	state: "open" | "closed";
+	jql: string;
+	project_keys: string[];
+	assignee: string;
+	required_labels: string[];
+	poll_interval_seconds: number;
+}
+
+export type AutomationTrigger = GitHubIssueTrigger | GitHubPullRequestTrigger | ScheduleTrigger | JiraIssueTrigger;
 
 export interface AutomationTaskSummary {
 	id: string;
@@ -225,6 +235,10 @@ export interface AutomationOccurrence {
 	observed_draft?: boolean;
 	observed_base_branch?: string;
 	observed_head_commit?: string;
+	issue_key?: string;
+	issue_summary?: string;
+	issue_description?: string;
+	observed_assignee?: string;
 	kind?: "scheduled" | "run_now";
 	scheduled_at?: string;
 	run_request_key?: string;
@@ -322,14 +336,17 @@ export interface UpdateAutomationInput extends Omit<CreateAutomationInput, "requ
 
 export interface TestAutomationResult {
 	matches: Array<{
-		number: number;
-		title: string;
+		number?: number;
+		title?: string;
 		url: string;
 		state: string;
 		labels: string[];
 		is_draft?: boolean;
 		base_branch?: string;
 		head_commit?: string;
+		key?: string;
+		summary?: string;
+		assignee?: string;
 	}>;
 	next_due_at?: string;
 }

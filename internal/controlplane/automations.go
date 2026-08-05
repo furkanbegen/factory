@@ -68,8 +68,9 @@ func normalizeAutomation(
 	value.Trigger.State = strings.ToLower(strings.TrimSpace(value.Trigger.State))
 	if value.Trigger.Type != protocol.AutomationTriggerGitHubIssue &&
 		value.Trigger.Type != protocol.AutomationTriggerGitHubPullRequest &&
-		value.Trigger.Type != protocol.AutomationTriggerSchedule {
-		return value, "", invalid("invalid_trigger_type", "trigger.type must be github_issue, github_pull_request, or schedule")
+		value.Trigger.Type != protocol.AutomationTriggerSchedule &&
+		value.Trigger.Type != protocol.AutomationTriggerJiraIssue {
+		return value, "", invalid("invalid_trigger_type", "trigger.type must be github_issue, github_pull_request, schedule, or jira_issue")
 	}
 	if value.Trigger.Type == protocol.AutomationTriggerSchedule {
 		_, cron, timezone, parseErr := parseCronSchedule(value.Trigger.Cron, value.Trigger.Timezone)
@@ -118,6 +119,42 @@ func normalizeAutomation(
 		return left < right
 	})
 	value.Trigger.RequiredLabels = labels
+	if value.Trigger.Type == protocol.AutomationTriggerJiraIssue {
+		if value.Trigger.State != "open" && value.Trigger.State != "closed" {
+			return value, "", invalid("invalid_issue_state", "trigger.state must be open or closed")
+		}
+		if len(value.Trigger.ProjectKeys) > 20 {
+			return value, "", invalid("invalid_project_keys", "project_keys may contain at most 20 keys")
+		}
+		seenProjects := make(map[string]struct{}, len(value.Trigger.ProjectKeys))
+		projects := make([]string, 0, len(value.Trigger.ProjectKeys))
+		for _, project := range value.Trigger.ProjectKeys {
+			project = strings.ToUpper(strings.TrimSpace(project))
+			if project == "" || len([]byte(project)) > 32 {
+				return value, "", invalid("invalid_project_keys", "project keys must be trimmed, nonblank, and at most 32 bytes")
+			}
+			if _, exists := seenProjects[project]; exists {
+				return value, "", invalid("invalid_project_keys", "project keys must be unique")
+			}
+			seenProjects[project] = struct{}{}
+			projects = append(projects, project)
+		}
+		sort.Strings(projects)
+		value.Trigger.ProjectKeys = projects
+		assignee := strings.TrimSpace(value.Trigger.Assignee)
+		if assignee == "" || strings.EqualFold(assignee, "currentUser()") {
+			assignee = "currentUser()"
+		}
+		value.Trigger.Assignee = assignee
+		jql, err := buildJiraJQL(projects, assignee, value.Trigger.RequiredLabels, value.Trigger.State)
+		if err != nil {
+			return value, "", invalid("invalid_jira_trigger", err.Error())
+		}
+		value.Trigger.JQL = jql
+		value.Trigger.IncludeDrafts = false
+		value.Trigger.BaseBranches = []string{}
+		return value, normalizeTitleKey(value.Title), nil
+	}
 	if value.Trigger.Type == protocol.AutomationTriggerGitHubIssue {
 		value.Trigger.IncludeDrafts = false
 		value.Trigger.BaseBranches = []string{}
@@ -173,6 +210,10 @@ func (s *Store) CreateAutomation(
 		return protocol.AutomationDetail{}, false, unavailable(err)
 	}
 	baseBranches, err := json.Marshal(value.Trigger.BaseBranches)
+	if err != nil {
+		return protocol.AutomationDetail{}, false, unavailable(err)
+	}
+	projectKeys, err := json.Marshal(value.Trigger.ProjectKeys)
 	if err != nil {
 		return protocol.AutomationDetail{}, false, unavailable(err)
 	}
@@ -246,6 +287,16 @@ func (s *Store) CreateAutomation(
 			) VALUES (?, ?, ?, ?, ?, ?)
 		`, automationID, value.Trigger.State, value.Trigger.IncludeDrafts, labels,
 			baseBranches, value.Trigger.PollIntervalSeconds); err != nil {
+			return protocol.AutomationDetail{}, false, unavailable(err)
+		}
+	} else if value.Trigger.Type == protocol.AutomationTriggerJiraIssue {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO automation_jira_issue_triggers(
+				automation_id, state, jql, project_keys_json, assignee,
+				required_labels_json, poll_interval_seconds
+			) VALUES (?, ?, ?, ?, ?, ?, ?)
+		`, automationID, value.Trigger.State, value.Trigger.JQL, projectKeys, value.Trigger.Assignee,
+			labels, value.Trigger.PollIntervalSeconds); err != nil {
 			return protocol.AutomationDetail{}, false, unavailable(err)
 		}
 	} else {
@@ -324,11 +375,15 @@ const automationSelect = `
 	       (SELECT COUNT(*) FROM automation_github_issue_triggers typed_issue WHERE typed_issue.automation_id = automation.id),
 	       (SELECT COUNT(*) FROM automation_github_pull_request_triggers typed_pull_request WHERE typed_pull_request.automation_id = automation.id),
 	       (SELECT COUNT(*) FROM automation_schedule_triggers typed_schedule WHERE typed_schedule.automation_id = automation.id),
-	       COALESCE(issue_trigger.issue_state, pull_request_trigger.pull_request_state, ''),
+	       (SELECT COUNT(*) FROM automation_jira_issue_triggers typed_jira WHERE typed_jira.automation_id = automation.id),
+	       COALESCE(issue_trigger.issue_state, pull_request_trigger.pull_request_state, jira_trigger.state, ''),
 	       COALESCE(pull_request_trigger.include_drafts, 0),
-	       COALESCE(issue_trigger.required_labels_json, pull_request_trigger.required_labels_json, '[]'),
+	       COALESCE(issue_trigger.required_labels_json, pull_request_trigger.required_labels_json, jira_trigger.required_labels_json, '[]'),
 	       COALESCE(pull_request_trigger.base_branches_json, '[]'),
-	       COALESCE(issue_trigger.poll_interval_seconds, pull_request_trigger.poll_interval_seconds, 0),
+	       COALESCE(jira_trigger.jql, ''),
+	       COALESCE(jira_trigger.project_keys_json, '[]'),
+	       COALESCE(jira_trigger.assignee, ''),
+	       COALESCE(issue_trigger.poll_interval_seconds, pull_request_trigger.poll_interval_seconds, jira_trigger.poll_interval_seconds, 0),
 	       COALESCE(schedule_trigger.cron, ''), COALESCE(schedule_trigger.timezone, ''),
 	       schedule_trigger.next_due_at,
 	       automation.health_status,
@@ -343,13 +398,15 @@ const automationSelect = `
 	LEFT JOIN automation_github_issue_triggers issue_trigger ON issue_trigger.automation_id = automation.id
 	LEFT JOIN automation_github_pull_request_triggers pull_request_trigger ON pull_request_trigger.automation_id = automation.id
 	LEFT JOIN automation_schedule_triggers schedule_trigger ON schedule_trigger.automation_id = automation.id
+	LEFT JOIN automation_jira_issue_triggers jira_trigger ON jira_trigger.automation_id = automation.id
 `
 
 func scanAutomation(row scanner) (protocol.Automation, error) {
 	var automation protocol.Automation
-	var enabled, issueTriggerCount, pullRequestTriggerCount, scheduleTriggerCount int
+	var enabled, issueTriggerCount, pullRequestTriggerCount, scheduleTriggerCount, jiraTriggerCount int
 	var includeDrafts int
-	var labels, baseBranches []byte
+	var labels, baseBranches, projectKeys []byte
+	var jql, jiraAssignee string
 	var lastChecked, nextCheck, nextDue sql.NullInt64
 	var createdAt, updatedAt int64
 	err := row.Scan(
@@ -357,9 +414,9 @@ func scanAutomation(row scanner) (protocol.Automation, error) {
 		&automation.WorkflowTitle, &automation.WorkflowRevision,
 		&automation.RepositoryID, &automation.RepositoryIdentity,
 		&automation.Context, &automation.TimeoutSeconds, &enabled,
-		&automation.Version, &automation.Trigger.Type, &issueTriggerCount, &pullRequestTriggerCount, &scheduleTriggerCount,
+		&automation.Version, &automation.Trigger.Type, &issueTriggerCount, &pullRequestTriggerCount, &scheduleTriggerCount, &jiraTriggerCount,
 		&automation.Trigger.State,
-		&includeDrafts, &labels, &baseBranches,
+		&includeDrafts, &labels, &baseBranches, &jql, &projectKeys, &jiraAssignee,
 		&automation.Trigger.PollIntervalSeconds, &automation.Trigger.Cron, &automation.Trigger.Timezone,
 		&nextDue, &automation.Health.Status,
 		&automation.Health.Code, &automation.Health.Message,
@@ -371,16 +428,25 @@ func scanAutomation(row scanner) (protocol.Automation, error) {
 		return automation, err
 	}
 	automation.Enabled = enabled != 0
-	if automation.Trigger.Type != protocol.AutomationTriggerGitHubIssue &&
-		automation.Trigger.Type != protocol.AutomationTriggerGitHubPullRequest &&
-		automation.Trigger.Type != protocol.AutomationTriggerSchedule {
+	switch automation.Trigger.Type {
+	case protocol.AutomationTriggerGitHubIssue:
+		if issueTriggerCount != 1 || pullRequestTriggerCount != 0 || scheduleTriggerCount != 0 || jiraTriggerCount != 0 {
+			return automation, errors.New("Automation typed trigger rows do not match its trigger type")
+		}
+	case protocol.AutomationTriggerGitHubPullRequest:
+		if pullRequestTriggerCount != 1 || issueTriggerCount != 0 || scheduleTriggerCount != 0 || jiraTriggerCount != 0 {
+			return automation, errors.New("Automation typed trigger rows do not match its trigger type")
+		}
+	case protocol.AutomationTriggerSchedule:
+		if scheduleTriggerCount != 1 || issueTriggerCount != 0 || pullRequestTriggerCount != 0 || jiraTriggerCount != 0 {
+			return automation, errors.New("Automation typed trigger rows do not match its trigger type")
+		}
+	case protocol.AutomationTriggerJiraIssue:
+		if jiraTriggerCount != 1 || issueTriggerCount != 0 || pullRequestTriggerCount != 0 || scheduleTriggerCount != 0 {
+			return automation, errors.New("Automation typed trigger rows do not match its trigger type")
+		}
+	default:
 		return automation, errors.New("Automation has an invalid trigger type")
-	}
-	if (automation.Trigger.Type == protocol.AutomationTriggerGitHubIssue && (issueTriggerCount != 1 || pullRequestTriggerCount != 0)) ||
-		(automation.Trigger.Type == protocol.AutomationTriggerGitHubPullRequest && (pullRequestTriggerCount != 1 || issueTriggerCount != 0)) ||
-		(automation.Trigger.Type == protocol.AutomationTriggerSchedule && (scheduleTriggerCount != 1 || issueTriggerCount != 0 || pullRequestTriggerCount != 0)) ||
-		(automation.Trigger.Type != protocol.AutomationTriggerSchedule && scheduleTriggerCount != 0) {
-		return automation, errors.New("Automation typed trigger rows do not match its trigger type")
 	}
 	automation.Trigger.IncludeDrafts = includeDrafts != 0
 	if err := json.Unmarshal(labels, &automation.Trigger.RequiredLabels); err != nil {
@@ -388,6 +454,13 @@ func scanAutomation(row scanner) (protocol.Automation, error) {
 	}
 	if err := json.Unmarshal(baseBranches, &automation.Trigger.BaseBranches); err != nil {
 		return automation, err
+	}
+	if automation.Trigger.Type == protocol.AutomationTriggerJiraIssue {
+		automation.Trigger.JQL = jql
+		automation.Trigger.Assignee = jiraAssignee
+		if err := json.Unmarshal(projectKeys, &automation.Trigger.ProjectKeys); err != nil {
+			return automation, err
+		}
 	}
 	if lastChecked.Valid {
 		value := fromMillis(lastChecked.Int64)
@@ -520,16 +593,20 @@ func (s *Store) UpdateAutomation(
 	if err != nil {
 		return protocol.AutomationDetail{}, unavailable(err)
 	}
+	projectKeys, err := json.Marshal(value.Trigger.ProjectKeys)
+	if err != nil {
+		return protocol.AutomationDetail{}, unavailable(err)
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return protocol.AutomationDetail{}, unavailable(err)
 	}
 	defer tx.Rollback()
 	var currentVersion, enabled, currentTimeout, currentInterval, currentIncludeDrafts int
-	var issueTriggerCount, pullRequestTriggerCount, scheduleTriggerCount int
+	var issueTriggerCount, pullRequestTriggerCount, scheduleTriggerCount, jiraTriggerCount int
 	var currentTitle, currentTitleKey, currentWorkflowID, currentContext, currentType, currentState string
-	var currentCron, currentTimezone string
-	var currentLabels, currentBaseBranches []byte
+	var currentCron, currentTimezone, currentJQL, currentAssignee string
+	var currentLabels, currentBaseBranches, currentProjectKeys []byte
 	err = tx.QueryRowContext(ctx, `
 		SELECT automation.version, automation.enabled, automation.title, automation.title_key,
 		       automation.workflow_id, automation.context, automation.timeout_seconds,
@@ -537,22 +614,28 @@ func (s *Store) UpdateAutomation(
 		       (SELECT COUNT(*) FROM automation_github_issue_triggers typed_issue WHERE typed_issue.automation_id = automation.id),
 		       (SELECT COUNT(*) FROM automation_github_pull_request_triggers typed_pull_request WHERE typed_pull_request.automation_id = automation.id),
 		       (SELECT COUNT(*) FROM automation_schedule_triggers typed_schedule WHERE typed_schedule.automation_id = automation.id),
-		       COALESCE(issue_trigger.issue_state, pull_request_trigger.pull_request_state, ''),
+		       (SELECT COUNT(*) FROM automation_jira_issue_triggers typed_jira WHERE typed_jira.automation_id = automation.id),
+	       COALESCE(issue_trigger.issue_state, pull_request_trigger.pull_request_state, jira_trigger.state, ''),
 		       COALESCE(pull_request_trigger.include_drafts, 0),
-		       COALESCE(issue_trigger.required_labels_json, pull_request_trigger.required_labels_json, '[]'),
+		       COALESCE(issue_trigger.required_labels_json, pull_request_trigger.required_labels_json, jira_trigger.required_labels_json, '[]'),
 		       COALESCE(pull_request_trigger.base_branches_json, '[]'),
-		       COALESCE(issue_trigger.poll_interval_seconds, pull_request_trigger.poll_interval_seconds, 0),
+		       COALESCE(jira_trigger.jql, ''),
+		       COALESCE(jira_trigger.project_keys_json, '[]'),
+		       COALESCE(jira_trigger.assignee, ''),
+		       COALESCE(issue_trigger.poll_interval_seconds, pull_request_trigger.poll_interval_seconds, jira_trigger.poll_interval_seconds, 0),
 		       COALESCE(schedule_trigger.cron, ''), COALESCE(schedule_trigger.timezone, '')
 		FROM automations automation
 		LEFT JOIN automation_github_issue_triggers issue_trigger ON issue_trigger.automation_id = automation.id
 		LEFT JOIN automation_github_pull_request_triggers pull_request_trigger ON pull_request_trigger.automation_id = automation.id
 		LEFT JOIN automation_schedule_triggers schedule_trigger ON schedule_trigger.automation_id = automation.id
+		LEFT JOIN automation_jira_issue_triggers jira_trigger ON jira_trigger.automation_id = automation.id
 		WHERE automation.id = ?
 	`, strings.TrimSpace(automationID)).Scan(
 		&currentVersion, &enabled, &currentTitle, &currentTitleKey, &currentWorkflowID,
-		&currentContext, &currentTimeout, &currentType, &issueTriggerCount, &pullRequestTriggerCount, &scheduleTriggerCount,
+		&currentContext, &currentTimeout, &currentType, &issueTriggerCount, &pullRequestTriggerCount, &scheduleTriggerCount, &jiraTriggerCount,
 		&currentState, &currentIncludeDrafts,
-		&currentLabels, &currentBaseBranches, &currentInterval, &currentCron, &currentTimezone,
+		&currentLabels, &currentBaseBranches, &currentJQL, &currentProjectKeys, &currentAssignee,
+		&currentInterval, &currentCron, &currentTimezone,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return protocol.AutomationDetail{}, ErrNotFound
@@ -563,17 +646,36 @@ func (s *Store) UpdateAutomation(
 	if currentType != value.Trigger.Type {
 		return protocol.AutomationDetail{}, conflict("automation_trigger_type_immutable", "trigger type is immutable; create a new Automation")
 	}
-	if (currentType == protocol.AutomationTriggerGitHubIssue && (issueTriggerCount != 1 || pullRequestTriggerCount != 0)) ||
-		(currentType == protocol.AutomationTriggerGitHubPullRequest && (pullRequestTriggerCount != 1 || issueTriggerCount != 0)) ||
-		(currentType == protocol.AutomationTriggerSchedule && (scheduleTriggerCount != 1 || issueTriggerCount != 0 || pullRequestTriggerCount != 0)) ||
-		(currentType != protocol.AutomationTriggerSchedule && scheduleTriggerCount != 0) {
-		return protocol.AutomationDetail{}, unavailable(errors.New("Automation typed trigger rows do not match its trigger type"))
+	switch currentType {
+	case protocol.AutomationTriggerGitHubIssue:
+		if issueTriggerCount != 1 || pullRequestTriggerCount != 0 || scheduleTriggerCount != 0 || jiraTriggerCount != 0 {
+			return protocol.AutomationDetail{}, unavailable(errors.New("Automation typed trigger rows do not match its trigger type"))
+		}
+	case protocol.AutomationTriggerGitHubPullRequest:
+		if pullRequestTriggerCount != 1 || issueTriggerCount != 0 || scheduleTriggerCount != 0 || jiraTriggerCount != 0 {
+			return protocol.AutomationDetail{}, unavailable(errors.New("Automation typed trigger rows do not match its trigger type"))
+		}
+	case protocol.AutomationTriggerSchedule:
+		if scheduleTriggerCount != 1 || issueTriggerCount != 0 || pullRequestTriggerCount != 0 || jiraTriggerCount != 0 {
+			return protocol.AutomationDetail{}, unavailable(errors.New("Automation typed trigger rows do not match its trigger type"))
+		}
+	case protocol.AutomationTriggerJiraIssue:
+		if jiraTriggerCount != 1 || issueTriggerCount != 0 || pullRequestTriggerCount != 0 || scheduleTriggerCount != 0 {
+			return protocol.AutomationDetail{}, unavailable(errors.New("Automation typed trigger rows do not match its trigger type"))
+		}
+	default:
+		return protocol.AutomationDetail{}, unavailable(errors.New("Automation has an invalid trigger type"))
 	}
 	exactReplay := currentVersion == input.ExpectedVersion+1 &&
 		currentTitle == value.Title && currentTitleKey == titleKey && currentWorkflowID == value.WorkflowID &&
 		currentContext == value.Context && currentTimeout == value.TimeoutSeconds
 	if currentType == protocol.AutomationTriggerSchedule {
 		exactReplay = exactReplay && currentCron == value.Trigger.Cron && currentTimezone == value.Trigger.Timezone
+	} else if currentType == protocol.AutomationTriggerJiraIssue {
+		exactReplay = exactReplay && currentState == value.Trigger.State && currentJQL == value.Trigger.JQL &&
+			currentAssignee == value.Trigger.Assignee &&
+			bytes.Equal(currentProjectKeys, projectKeys) && bytes.Equal(currentLabels, labels) &&
+			currentInterval == value.Trigger.PollIntervalSeconds
 	} else {
 		exactReplay = exactReplay && currentState == value.Trigger.State &&
 			currentIncludeDrafts == boolInt(value.Trigger.IncludeDrafts) &&
@@ -640,6 +742,16 @@ func (s *Store) UpdateAutomation(
 			    base_branches_json = ?, poll_interval_seconds = ?
 			WHERE automation_id = ?
 		`, value.Trigger.State, value.Trigger.IncludeDrafts, labels, baseBranches,
+			value.Trigger.PollIntervalSeconds, automationID); err != nil {
+			return protocol.AutomationDetail{}, unavailable(err)
+		}
+	} else if value.Trigger.Type == protocol.AutomationTriggerJiraIssue {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE automation_jira_issue_triggers
+			SET state = ?, jql = ?, project_keys_json = ?, assignee = ?, required_labels_json = ?,
+			    poll_interval_seconds = ?
+			WHERE automation_id = ?
+		`, value.Trigger.State, value.Trigger.JQL, projectKeys, value.Trigger.Assignee, labels,
 			value.Trigger.PollIntervalSeconds, automationID); err != nil {
 			return protocol.AutomationDetail{}, unavailable(err)
 		}
@@ -741,7 +853,11 @@ func (s *Store) setAutomationEnabled(
 			}
 			status, message, nextDue = "pending", "Waiting for the next scheduled occurrence.", due.UnixMilli()
 		} else {
-			status, message, nextCheck = "pending", "Waiting for the next GitHub check.", now
+			providerName := "GitHub"
+			if triggerType == protocol.AutomationTriggerJiraIssue {
+				providerName = "Jira"
+			}
+			status, message, nextCheck = "pending", "Waiting for the next "+providerName+" check.", now
 		}
 	}
 	if _, err := tx.ExecContext(ctx, `
@@ -846,6 +962,9 @@ func (s *Store) automationOccurrencesPage(
 		       pull_request.pull_request_title, pull_request.observed_state,
 		       pull_request.observed_draft, pull_request.observed_base_branch,
 		       pull_request.observed_head_commit, pull_request.observed_labels_json,
+		       jira.issue_key, jira.issue_url, jira.issue_title,
+		       jira.issue_summary, jira.issue_description,
+		       jira.observed_status, jira.observed_assignee, jira.observed_labels_json,
 		       schedule.kind, schedule.scheduled_at, schedule.run_request_key,
 		       schedule.cron, schedule.timezone,
 		       occurrence.task_request_key, occurrence.task_id_snapshot,
@@ -855,6 +974,7 @@ func (s *Store) automationOccurrencesPage(
 		JOIN automations automation ON automation.id = occurrence.automation_id
 		LEFT JOIN automation_github_issue_occurrences issue ON issue.occurrence_id = occurrence.id
 		LEFT JOIN automation_github_pull_request_occurrences pull_request ON pull_request.occurrence_id = occurrence.id
+		LEFT JOIN automation_jira_issue_occurrences jira ON jira.occurrence_id = occurrence.id
 		LEFT JOIN automation_schedule_occurrences schedule ON schedule.occurrence_id = occurrence.id
 		LEFT JOIN tasks task ON task.id = occurrence.task_id
 		LEFT JOIN executions execution ON execution.task_id = task.id
@@ -882,9 +1002,10 @@ func (s *Store) automationOccurrencesPage(
 		var issueNumber, pullRequestNumber, observedDraft sql.NullInt64
 		var issueURL, issueTitle, issueState, pullRequestURL, pullRequestTitle sql.NullString
 		var pullRequestState, baseBranch, headCommit sql.NullString
+		var jiraKey, jiraURL, jiraTitle, jiraSummary, jiraDescription, jiraStatus, jiraAssignee sql.NullString
 		var scheduleKind, runRequestKey, scheduleCron, scheduleTimezone sql.NullString
 		var scheduledAt sql.NullInt64
-		var issueLabels, pullRequestLabels []byte
+		var issueLabels, pullRequestLabels, jiraLabels []byte
 		var taskID, taskTitle, taskState sql.NullString
 		var createdAt, updatedAt int64
 		if err := rows.Scan(
@@ -893,6 +1014,8 @@ func (s *Store) automationOccurrencesPage(
 			&issueTitle, &issueState, &issueLabels, &pullRequestNumber,
 			&pullRequestURL, &pullRequestTitle, &pullRequestState, &observedDraft,
 			&baseBranch, &headCommit, &pullRequestLabels,
+			&jiraKey, &jiraURL, &jiraTitle, &jiraSummary, &jiraDescription,
+			&jiraStatus, &jiraAssignee, &jiraLabels,
 			&scheduleKind, &scheduledAt, &runRequestKey, &scheduleCron, &scheduleTimezone,
 			&occurrence.TaskRequestKey, &occurrence.TaskIDSnapshot,
 			&occurrence.Diagnostic, &createdAt, &updatedAt,
@@ -942,6 +1065,21 @@ func (s *Store) automationOccurrencesPage(
 				occurrence.RunRequestKey = runRequestKey.String
 			} else {
 				return protocol.AutomationOccurrencePage{}, unavailable(errors.New("schedule Occurrence has invalid kind"))
+			}
+		case protocol.AutomationTriggerJiraIssue:
+			if !jiraKey.Valid || !jiraURL.Valid || !jiraTitle.Valid || !jiraSummary.Valid ||
+				!jiraStatus.Valid || !jiraAssignee.Valid || jiraLabels == nil || issueNumber.Valid || pullRequestNumber.Valid {
+				return protocol.AutomationOccurrencePage{}, unavailable(errors.New("Jira issue Occurrence is missing typed metadata"))
+			}
+			occurrence.IssueKey = jiraKey.String
+			occurrence.IssueURL = jiraURL.String
+			occurrence.IssueTitle = jiraTitle.String
+			occurrence.IssueSummary = jiraSummary.String
+			occurrence.IssueDescription = jiraDescription.String
+			occurrence.ObservedState = jiraStatus.String
+			occurrence.ObservedAssignee = jiraAssignee.String
+			if err := json.Unmarshal(jiraLabels, &occurrence.ObservedLabels); err != nil {
+				return protocol.AutomationOccurrencePage{}, unavailable(err)
 			}
 		default:
 			return protocol.AutomationOccurrencePage{}, unavailable(errors.New("Occurrence has an invalid trigger type"))

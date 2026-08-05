@@ -79,7 +79,7 @@ export function AutomationsView({ onAutomation }: { onAutomation: (id: string) =
       />
       {query.error && <StaleBanner error={query.error} />}
       <div className="view-toolbar">
-        <p>Typed GitHub issue, pull-request, and schedule triggers evaluated by the local control plane.</p>
+        <p>Typed GitHub issue, pull-request, Jira issue, and schedule triggers evaluated by the local control plane.</p>
         <div className="detail-actions">
           <button className="button button-secondary" onClick={() => setMigrationOpen(true)}>
             <DatabaseBackup size={15} /> Migrate legacy poller
@@ -312,10 +312,12 @@ export function AutomationDetail({
         <section className="panel preview-panel" aria-live="polite">
           <PanelHeading title="Test results" aside={preview.next_due_at ? `Next due ${formatTimestamp(preview.next_due_at)}` : `${preview.matches.length} bounded match${preview.matches.length === 1 ? "" : "es"}`} />
           <p className="muted">Testing creates no task or durable occurrence.</p>
-          {preview.next_due_at ? <p>The next matching UTC instant is <strong>{new Date(preview.next_due_at).toISOString()}</strong>.</p> : preview.matches.length === 0 ? <p>No GitHub items matched.</p> : preview.matches.map((match) => (
-            <a key={match.number} href={match.url} target="_blank" rel="noreferrer" className="preview-match">
-              <strong>#{match.number} {match.title}</strong>
-              <span>{match.state}{match.base_branch ? ` · base ${match.base_branch}` : ""}{match.is_draft ? " · draft" : ""} · {match.labels.join(", ") || "no labels"}</span>
+          {preview.next_due_at ? <p>The next matching UTC instant is <strong>{new Date(preview.next_due_at).toISOString()}</strong>.</p> : preview.matches.length === 0 ? <p>No items matched.</p> : preview.matches.map((match) => (
+            <a key={match.key ?? match.number} href={match.url} target="_blank" rel="noreferrer" className="preview-match">
+              <strong>{match.key ? `${match.key} ${match.summary}` : `#${match.number} ${match.title}`}</strong>
+              <span>{match.key
+                ? `${match.state}${match.assignee ? ` · ${match.assignee}` : ""}`
+                : `${match.state}${match.base_branch ? ` · base ${match.base_branch}` : ""}${match.is_draft ? " · draft" : ""}`} · {match.labels.join(", ") || "no labels"}</span>
             </a>
           ))}
         </section>
@@ -332,13 +334,20 @@ export function AutomationDetail({
               <div><dt>Timezone</dt><dd>{automation.trigger.timezone}</dd></div>
               <div><dt>Next due UTC</dt><dd>{automation.next_due_at ? new Date(automation.next_due_at).toISOString() : "Disabled"}</dd></div>
             </> : <>
-              <div><dt>{automation.trigger.type === "github_pull_request" ? "Pull request state" : "Issue state"}</dt><dd>{automation.trigger.state}</dd></div>
-            {automation.trigger.type === "github_pull_request" && <>
-              <div><dt>Drafts</dt><dd>{automation.trigger.include_drafts ? "Included" : "Excluded"}</dd></div>
-              <div><dt>Base branches</dt><dd>{automation.trigger.base_branches.join(", ") || "Any"}</dd></div>
-            </>}
-            <div><dt>Required labels</dt><dd>{automation.trigger.required_labels.join(", ") || "None"}</dd></div>
-            <div><dt>Polling</dt><dd>Every {automation.trigger.poll_interval_seconds} seconds</dd></div>
+              {automation.trigger.type === "jira_issue" ? <>
+                <div><dt>Issue state</dt><dd>{automation.trigger.state}</dd></div>
+                <div><dt>Assignee</dt><dd>{automation.trigger.assignee === "currentUser()" ? "Assigned to me (currentUser())" : automation.trigger.assignee}</dd></div>
+                <div><dt>Project keys</dt><dd>{automation.trigger.project_keys.join(", ") || "Any"}</dd></div>
+                <div><dt>JQL</dt><dd className="mono">{automation.trigger.jql}</dd></div>
+              </> : <>
+                <div><dt>{automation.trigger.type === "github_pull_request" ? "Pull request state" : "Issue state"}</dt><dd>{automation.trigger.state}</dd></div>
+              {automation.trigger.type === "github_pull_request" && <>
+                <div><dt>Drafts</dt><dd>{automation.trigger.include_drafts ? "Included" : "Excluded"}</dd></div>
+                <div><dt>Base branches</dt><dd>{automation.trigger.base_branches.join(", ") || "Any"}</dd></div>
+              </>}
+              </>}
+              <div><dt>Required labels</dt><dd>{automation.trigger.required_labels.join(", ") || "None"}</dd></div>
+              <div><dt>Polling</dt><dd>Every {automation.trigger.poll_interval_seconds} seconds</dd></div>
             </>}
             <div><dt>Timeout</dt><dd>{automation.timeout_seconds} seconds</dd></div>
           </dl>
@@ -667,6 +676,19 @@ function AutomationForm({
   const [triggerType, setTriggerType] = useState<AutomationTrigger["type"]>(current?.trigger.type ?? "github_issue");
   const isPullRequest = triggerType === "github_pull_request";
   const isSchedule = triggerType === "schedule";
+  const isJira = triggerType === "jira_issue";
+  const [jiraProjectKeys, setJiraProjectKeys] = useState<string>(
+    current?.trigger.type === "jira_issue" ? current.trigger.project_keys.join(", ") : "",
+  );
+  const [jiraAssignee, setJiraAssignee] = useState<string>(
+    current?.trigger.type === "jira_issue" ? current.trigger.assignee : "",
+  );
+  const [jiraLabels, setJiraLabels] = useState<string>(
+    current?.trigger.type === "jira_issue" ? current.trigger.required_labels.join(", ") : "",
+  );
+  const [jiraState, setJiraState] = useState<"open" | "closed">(
+    current?.trigger.type === "jira_issue" ? current.trigger.state : "open",
+  );
   useEffect(() => {
     closeRef.current = onClose;
   }, [onClose]);
@@ -706,7 +728,7 @@ function AutomationForm({
     const pollInterval = Number(form.get("poll_interval_seconds"));
     const cron = String(form.get("cron") ?? "").trim().replace(/\s+/g, " ");
     const timezone = String(form.get("timezone") ?? "").trim();
-    const labels = String(form.get("required_labels") ?? "").split(",").map((label) => label.trim()).filter(Boolean);
+    const labels = isJira ? jiraLabels.split(",").map((label) => label.trim()).filter(Boolean) : String(form.get("required_labels") ?? "").split(",").map((label) => label.trim()).filter(Boolean);
     const baseBranches = String(form.get("base_branches") ?? "").split(",").map((branch) => branch.trim()).filter(Boolean);
     const nextErrors: Record<string, string> = {};
     if (!title) nextErrors.title = "Enter an Automation title.";
@@ -715,6 +737,12 @@ function AutomationForm({
     if (!repository) nextErrors.repository = "Choose a repository.";
     if (!isSchedule && (labels.length > 20 || labels.some((label) => new TextEncoder().encode(label).length > 200))) nextErrors.labels = "Use at most 20 labels of 200 bytes each.";
     if (isPullRequest && (baseBranches.length > 20 || baseBranches.some((branch) => new TextEncoder().encode(branch).length > 255))) nextErrors.branches = "Use at most 20 base branches of 255 bytes each.";
+    if (isJira) {
+      const projectKeys = jiraProjectKeys.split(",").map((key) => key.trim().toUpperCase()).filter(Boolean);
+      if (projectKeys.length > 20 || projectKeys.some((key) => new TextEncoder().encode(key).length > 32)) nextErrors.projects = "Use at most 20 project keys of 32 bytes each.";
+      const unsafe = jiraAssignee.match(/["'\\()[\]]/);
+      if (unsafe) nextErrors.assignee = "Assignee must not contain quotes, backslashes, or parentheses.";
+    }
     if (!isSchedule && (!Number.isInteger(pollInterval) || pollInterval < 10 || pollInterval > 86_400)) nextErrors.interval = "Use 10 to 86,400 seconds.";
     if (isSchedule && cron.split(" ").length !== 5) nextErrors.cron = "Enter exactly five cron fields, with no seconds field.";
     if (isSchedule && !timezone) nextErrors.timezone = "Enter an IANA timezone, such as Europe/London.";
@@ -726,6 +754,14 @@ function AutomationForm({
       type: "schedule",
       cron,
       timezone,
+    } : isJira ? {
+      type: "jira_issue",
+      state: String(form.get("state")) as "open" | "closed",
+      jql: buildJqlPreview(jiraProjectKeys, jiraAssignee, jiraLabels, String(form.get("state") ?? "open")),
+      project_keys: jiraProjectKeys.split(",").map((key) => key.trim().toUpperCase()).filter(Boolean),
+      assignee: normalizeJiraAssignee(jiraAssignee),
+      required_labels: labels,
+      poll_interval_seconds: pollInterval,
     } : isPullRequest ? {
       type: "github_pull_request",
       state: String(form.get("state")) as "open" | "closed" | "merged",
@@ -803,10 +839,17 @@ function AutomationForm({
                 <option value="github_issue">GitHub issue</option>
                 <option value="github_pull_request">GitHub pull request</option>
                 <option value="schedule">Schedule</option>
+                <option value="jira_issue">Jira issue</option>
               </select>
             </Field>
             {!isSchedule && <Field label={isPullRequest ? "Pull request state" : "Issue state"} htmlFor={stateID}>
-              <select id={stateID} name="state" defaultValue={current?.trigger.type === "github_issue" || current?.trigger.type === "github_pull_request" ? current.trigger.state : "open"}>
+              <select
+                id={stateID}
+                name="state"
+                value={isJira ? jiraState : undefined}
+                onChange={isJira ? (event) => setJiraState(event.target.value as "open" | "closed") : undefined}
+                defaultValue={!isJira ? (current?.trigger.type === "github_issue" || current?.trigger.type === "github_pull_request" ? current.trigger.state : "open") : undefined}
+              >
                 <option value="open">Open</option><option value="closed">Closed</option>
                 {isPullRequest && <option value="merged">Merged</option>}
               </select>
@@ -828,6 +871,40 @@ function AutomationForm({
               </Field>
               <Field label="IANA timezone" htmlFor={timezoneID} error={errors.timezone} hint="For example Europe/London">
                 <input id={timezoneID} name="timezone" defaultValue={current?.trigger.type === "schedule" ? current.trigger.timezone : Intl.DateTimeFormat().resolvedOptions().timeZone} aria-invalid={Boolean(errors.timezone)} />
+              </Field>
+            </> : isJira ? <>
+              <Field label="Jira project keys" htmlFor={triggerTypeID} error={errors.projects} hint="Comma separated · optional · up to 20">
+                <input
+                  id={triggerTypeID}
+                  value={jiraProjectKeys}
+                  onChange={(event) => setJiraProjectKeys(event.target.value)}
+                  placeholder="SARP, OPS"
+                  aria-invalid={Boolean(errors.projects)}
+                />
+              </Field>
+              <Field label="Assignee" htmlFor={timezoneID} error={errors.assignee} hint="Leave empty for assigned to me (currentUser())">
+                <input
+                  id={timezoneID}
+                  value={jiraAssignee}
+                  onChange={(event) => setJiraAssignee(event.target.value)}
+                  placeholder="currentUser()"
+                  aria-invalid={Boolean(errors.assignee)}
+                />
+              </Field>
+              <Field label="Required labels" htmlFor={labelsID} error={errors.labels} hint="Comma separated · up to 20">
+                <input
+                  id={labelsID}
+                  value={jiraLabels}
+                  onChange={(event) => setJiraLabels(event.target.value)}
+                  placeholder="factory-platform"
+                  aria-invalid={Boolean(errors.labels)}
+                />
+              </Field>
+              <Field label="Poll interval (seconds)" htmlFor={intervalID} error={errors.interval}>
+                <input id={intervalID} name="poll_interval_seconds" type="number" min={10} max={86_400} defaultValue={current?.trigger.type === "jira_issue" ? current.trigger.poll_interval_seconds : 30} aria-invalid={Boolean(errors.interval)} />
+              </Field>
+              <Field label="JQL preview" htmlFor={contextID} hint="Composed from the fields above. No free-form JQL is accepted.">
+                <code className="jql-preview">{buildJqlPreview(jiraProjectKeys, jiraAssignee, jiraLabels, jiraState)}</code>
               </Field>
             </> : <>
               <Field label="Required labels" htmlFor={labelsID} error={errors.labels} hint="Comma separated · up to 20">
@@ -880,6 +957,15 @@ function triggerSummary(automation: Automation): string {
   const labels = automation.trigger.required_labels.length
     ? ` · labels ${automation.trigger.required_labels.join(", ")}`
     : "";
+  if (automation.trigger.type === "jira_issue") {
+    const projects = automation.trigger.project_keys.length
+      ? ` · projects ${automation.trigger.project_keys.join(", ")}`
+      : "";
+    const assignee = automation.trigger.assignee === "currentUser()"
+      ? " · assigned to me"
+      : ` · assignee ${automation.trigger.assignee}`;
+    return `Jira issues · ${automation.trigger.state}${assignee}${projects}${labels}`;
+  }
   if (automation.trigger.type === "github_pull_request") {
     const drafts = automation.trigger.include_drafts ? " · including drafts" : " · excluding drafts";
     const bases = automation.trigger.base_branches.length
@@ -893,9 +979,28 @@ function triggerSummary(automation: Automation): string {
 function occurrenceIdentity(occurrence: AutomationOccurrence): string {
   if (occurrence.kind === "scheduled") return `Scheduled ${occurrence.scheduled_at ? new Date(occurrence.scheduled_at).toISOString() : "instant"}`;
   if (occurrence.kind === "run_now") return "Run now";
+  if (occurrence.issue_key) return `${occurrence.issue_key} ${occurrence.issue_summary || occurrence.issue_title || ""}`.trim();
   const number = occurrence.pull_request_number ?? occurrence.issue_number ?? 0;
   const title = occurrence.pull_request_title ?? occurrence.issue_title ?? "Unknown GitHub item";
   return `#${number} ${title}`;
+}
+
+function normalizeJiraAssignee(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.toLowerCase() === "currentuser()") return "currentUser()";
+  return trimmed;
+}
+
+function buildJqlPreview(projectKeysCsv: string, assignee: string, labelsCsv: string, state: string): string {
+  const projects = projectKeysCsv.split(",").map((key) => key.trim().toUpperCase()).filter(Boolean);
+  const labels = labelsCsv.split(",").map((label) => label.trim()).filter(Boolean);
+  const statusClause = state === "closed" ? "status in (Done, Closed)" : "status not in (Done, Closed)";
+  const parts = [statusClause];
+  if (projects.length) parts.push(`project in (${projects.map((key) => `"${key}"`).join(", ")})`);
+  for (const label of labels) parts.push(`labels = "${label}"`);
+  const resolved = normalizeJiraAssignee(assignee);
+  parts.push(`assignee = ${resolved === "currentUser()" ? "currentUser()" : `"${resolved}"`}`);
+  return parts.join(" AND ");
 }
 
 function formatTimestamp(value?: string): string {

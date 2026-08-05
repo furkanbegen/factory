@@ -28,6 +28,7 @@ const (
 	automationDiagnosticLimit      = 4 << 10
 	automationShutdownDrainTimeout = 5 * time.Second
 	maxObservationBytes            = 16 << 10
+	maxJiraDescriptionBytes        = 16 << 10
 	maxConcurrentAutomationChecks  = 4
 )
 
@@ -492,6 +493,372 @@ func equalGitHubPullRequestMatch(left, right protocol.GitHubPullRequestMatch) bo
 	return bytes.Equal(leftJSON, rightJSON)
 }
 
+type jiraIssueLister interface {
+	Search(context.Context, protocol.JiraIssueTrigger) ([]protocol.JiraIssueMatch, error)
+	View(context.Context, string) (string, error)
+}
+
+type jiraRunner struct {
+	lookPath func(string) (string, error)
+	run      func(context.Context, string, ...string) ([]byte, []byte, bool, bool, error)
+}
+
+func newJiraRunner() jiraRunner {
+	return jiraRunner{lookPath: exec.LookPath, run: runAutomationCommand}
+}
+
+type jiraIssueWire struct {
+	Key    string `json:"key"`
+	Self   string `json:"self"`
+	ID     string `json:"id"`
+	Fields struct {
+		Summary string `json:"summary"`
+		Status  struct {
+			Name string `json:"name"`
+		} `json:"status"`
+		Labels   []string `json:"labels"`
+		Assignee *struct {
+			DisplayName string `json:"displayName"`
+		} `json:"assignee"`
+	} `json:"fields"`
+}
+
+func (runner jiraRunner) Search(ctx context.Context, trigger protocol.JiraIssueTrigger) ([]protocol.JiraIssueMatch, error) {
+	if _, err := runner.lookPath("acli"); err != nil {
+		return nil, &automationCheckError{
+			code:    "jira_not_found",
+			message: "Atlassian CLI (acli) was not found on PATH. Install acli and configure its Jira credentials.",
+		}
+	}
+	arguments := []string{
+		"jira", "workitem", "search", "--jql", trigger.JQL,
+		"--fields", "key,summary,assignee,status,labels",
+		"--limit", strconv.Itoa(protocol.MaxAutomationMatches + 1),
+		"--json",
+	}
+	stdout, stderr, stdoutTooLarge, stderrTooLarge, err := runner.run(ctx, "acli", arguments...)
+	if stdoutTooLarge {
+		return nil, &automationCheckError{code: "jira_output_too_large", message: "acli output exceeded 4 MiB. Narrow the Jira JQL with labels or project keys."}
+	}
+	if stderrTooLarge {
+		return nil, &automationCheckError{code: "jira_error_output_too_large", message: "acli error output exceeded 64 KiB. Run `acli` authentication diagnostics and retry the check."}
+	}
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return nil, &automationCheckError{code: "jira_timed_out", message: "acli did not finish within 30 seconds. Check Jira connectivity and narrow the JQL."}
+		}
+		if errors.Is(err, context.Canceled) {
+			return nil, &automationCheckError{code: "jira_cancelled", message: "The Jira check was cancelled before completion."}
+		}
+		message := strings.TrimSpace(string(stderr))
+		lower := strings.ToLower(message)
+		if strings.Contains(lower, "auth") || strings.Contains(lower, "login") || strings.Contains(lower, "token") || strings.Contains(lower, "credential") || strings.Contains(lower, "permission") {
+			return nil, &automationCheckError{code: "jira_unauthenticated", message: "acli is not authenticated for Jira. Configure its credentials on the control-plane host and retry."}
+		}
+		if message == "" {
+			message = err.Error()
+		}
+		return nil, &automationCheckError{code: "jira_failed", message: truncateAutomationDiagnostic("acli jira workitem search failed: " + message)}
+	}
+	var values []jiraIssueWire
+	if err := decodeJiraJSON(stdout, &values); err != nil {
+		return nil, &automationCheckError{code: "jira_malformed_output", message: "acli returned malformed or unexpected JSON: " + truncateAutomationDiagnostic(err.Error())}
+	}
+	if values == nil {
+		return nil, &automationCheckError{code: "jira_malformed_output", message: "acli returned null instead of a Jira issue JSON array"}
+	}
+	if len(values) > protocol.MaxAutomationMatches {
+		return nil, &automationCheckError{code: "jira_match_limit", message: "acli returned more than 100 issues. Add required labels or project keys to the JQL."}
+	}
+	matches := make([]protocol.JiraIssueMatch, 0, len(values))
+	seen := make(map[string]protocol.JiraIssueMatch, len(values))
+	for index, value := range values {
+		match, err := buildJiraIssueMatch(value)
+		if err != nil {
+			return nil, &automationCheckError{code: "jira_invalid_output", message: fmt.Sprintf("acli result %d is invalid: %s", index+1, err)}
+		}
+		if err := validateJiraIssueMatch(trigger, match); err != nil {
+			return nil, &automationCheckError{code: "jira_invalid_output", message: fmt.Sprintf("acli result %d is invalid: %s", index+1, err)}
+		}
+		if previous, exists := seen[match.Key]; exists {
+			if !equalJiraIssueMatch(previous, match) {
+				return nil, &automationCheckError{code: "jira_conflicting_duplicate", message: fmt.Sprintf("acli returned conflicting entries for issue %s", match.Key)}
+			}
+			continue
+		}
+		seen[match.Key] = match
+		matches = append(matches, match)
+	}
+	return matches, nil
+}
+
+func buildJiraIssueMatch(value jiraIssueWire) (protocol.JiraIssueMatch, error) {
+	match := protocol.JiraIssueMatch{
+		Key: strings.TrimSpace(value.Key), Summary: strings.TrimSpace(value.Fields.Summary),
+		Status: strings.TrimSpace(value.Fields.Status.Name), Labels: append([]string(nil), value.Fields.Labels...),
+	}
+	if value.Fields.Assignee != nil {
+		match.Assignee = strings.TrimSpace(value.Fields.Assignee.DisplayName)
+	}
+	urlValue, err := derivedJiraBrowseURL(value.Self, match.Key)
+	if err != nil {
+		return match, err
+	}
+	match.URL = urlValue
+	return match, nil
+}
+
+func derivedJiraBrowseURL(self, key string) (string, error) {
+	if self == "" {
+		return "", errors.New("acli result is missing its self URL")
+	}
+	parsed, err := url.Parse(self)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
+		return "", errors.New("self URL must be an HTTPS URL")
+	}
+	segments := strings.Split(strings.Trim(parsed.Path, "/"), "/")
+	foundIssue := false
+	for index := 0; index+1 < len(segments); index++ {
+		if segments[index] == "issue" && index+1 == len(segments)-1 {
+			foundIssue = true
+			break
+		}
+	}
+	if !foundIssue {
+		return "", errors.New("self URL does not identify a Jira issue")
+	}
+	return parsed.Scheme + "://" + parsed.Host + "/browse/" + key, nil
+}
+
+func (runner jiraRunner) View(ctx context.Context, key string) (string, error) {
+	if _, err := runner.lookPath("acli"); err != nil {
+		return "", &automationCheckError{
+			code:    "jira_not_found",
+			message: "Atlassian CLI (acli) was not found on PATH. Install acli and configure its Jira credentials.",
+		}
+	}
+	arguments := []string{"jira", "workitem", "view", key, "--fields", "*all", "--json"}
+	stdout, stderr, stdoutTooLarge, stderrTooLarge, err := runner.run(ctx, "acli", arguments...)
+	if stdoutTooLarge {
+		return "", &automationCheckError{code: "jira_output_too_large", message: "acli view output exceeded 4 MiB."}
+	}
+	if stderrTooLarge {
+		return "", &automationCheckError{code: "jira_error_output_too_large", message: "acli error output exceeded 64 KiB. Run `acli` authentication diagnostics and retry."}
+	}
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return "", &automationCheckError{code: "jira_timed_out", message: "acli did not finish viewing the issue within 30 seconds. Check Jira connectivity."}
+		}
+		if errors.Is(err, context.Canceled) {
+			return "", &automationCheckError{code: "jira_cancelled", message: "The Jira issue view was cancelled before completion."}
+		}
+		message := strings.TrimSpace(string(stderr))
+		lower := strings.ToLower(message)
+		if strings.Contains(lower, "auth") || strings.Contains(lower, "login") || strings.Contains(lower, "token") || strings.Contains(lower, "credential") || strings.Contains(lower, "permission") || strings.Contains(lower, "not found") {
+			return "", &automationCheckError{code: "jira_unauthenticated", message: "acli cannot read this Jira issue. Verify its credentials and the issue key."}
+		}
+		if message == "" {
+			message = err.Error()
+		}
+		return "", &automationCheckError{code: "jira_failed", message: truncateAutomationDiagnostic("acli jira workitem view failed: " + message)}
+	}
+	var value struct {
+		Key    string `json:"key"`
+		Fields struct {
+			Summary     string          `json:"summary"`
+			Description json.RawMessage `json:"description"`
+		} `json:"fields"`
+	}
+	if err := decodeJiraJSON(stdout, &value); err != nil {
+		return "", &automationCheckError{code: "jira_malformed_output", message: "acli returned malformed or unexpected issue JSON: " + truncateAutomationDiagnostic(err.Error())}
+	}
+	if value.Key != key {
+		return "", &automationCheckError{code: "jira_invalid_output", message: "acli returned a different issue than requested"}
+	}
+	description, err := extractJiraDescription(value.Fields.Description)
+	if err != nil {
+		return "", &automationCheckError{code: "jira_invalid_output", message: "acli returned an unsupported issue description: " + truncateAutomationDiagnostic(err.Error())}
+	}
+	return truncateJiraDescription(description), nil
+}
+
+func truncateJiraDescription(value string) string {
+	value = strings.TrimSpace(value)
+	if len([]byte(value)) <= maxJiraDescriptionBytes {
+		return value
+	}
+	return string([]byte(value)[:maxJiraDescriptionBytes])
+}
+
+func decodeJiraJSON(body []byte, target any) error {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); err == nil {
+		return errors.New("multiple JSON values")
+	} else if !errors.Is(err, io.EOF) {
+		return fmt.Errorf("trailing JSON data: %w", err)
+	}
+	return nil
+}
+
+func extractJiraDescription(raw json.RawMessage) (string, error) {
+	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return "", nil
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		return text, nil
+	}
+	var document map[string]any
+	if err := json.Unmarshal(raw, &document); err != nil {
+		return "", err
+	}
+	return extractJiraADFText(document), nil
+}
+
+func extractJiraADFText(node map[string]any) string {
+	kind, _ := node["type"].(string)
+	if kind == "text" {
+		if text, ok := node["text"].(string); ok {
+			return text
+		}
+		return ""
+	}
+	var builder strings.Builder
+	if content, ok := node["content"].([]any); ok {
+		for _, child := range content {
+			if childMap, ok := child.(map[string]any); ok {
+				builder.WriteString(extractJiraADFText(childMap))
+			}
+		}
+	}
+	switch kind {
+	case "paragraph", "heading", "listItem", "codeBlock", "blockquote", "panel", "rule":
+		builder.WriteString("\n")
+	}
+	return builder.String()
+}
+
+var jiraIssueKeyPattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]+-[1-9][0-9]*$`)
+
+func validateJiraIssueMatch(trigger protocol.JiraIssueTrigger, match protocol.JiraIssueMatch) error {
+	if !jiraIssueKeyPattern.MatchString(match.Key) {
+		return errors.New("issue key must match ^[A-Z][A-Z0-9_]+-[1-9][0-9]*$")
+	}
+	if match.Summary == "" || utf8.RuneCountInString(match.Summary) > 500 || len([]byte(match.Summary)) > 2<<10 {
+		return errors.New("summary must be nonblank, at most 500 characters, and at most 2 KiB")
+	}
+	if match.Status == "" || len([]byte(match.Status)) > 255 || match.Status != strings.TrimSpace(match.Status) {
+		return errors.New("status must be trimmed, nonblank, and at most 255 bytes")
+	}
+	closed := strings.EqualFold(match.Status, "Done") || strings.EqualFold(match.Status, "Closed")
+	if trigger.State == "closed" && !closed {
+		return errors.New("status does not match the configured closed state")
+	}
+	if trigger.State != "closed" && closed {
+		return errors.New("status must be a nonterminal status")
+	}
+	if len([]byte(match.Assignee)) > 255 {
+		return errors.New("assignee must be at most 255 bytes")
+	}
+	parsed, err := url.Parse(match.URL)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return errors.New("URL must be an HTTPS Jira URL without query or fragment")
+	}
+	if !strings.Contains(parsed.Path, "/browse/"+match.Key) || len([]byte(match.URL)) > 2048 {
+		return errors.New("URL does not identify the Jira issue key")
+	}
+	if len(match.Labels) > 100 {
+		return errors.New("issue has more than 100 labels")
+	}
+	labelBytes := 0
+	for _, label := range match.Labels {
+		labelBytes += len([]byte(label))
+		if label == "" || label != strings.TrimSpace(label) || len([]byte(label)) > 200 {
+			return errors.New("issue contains an invalid label")
+		}
+	}
+	if labelBytes > 8<<10 {
+		return errors.New("issue labels exceed 8 KiB")
+	}
+	for _, required := range trigger.RequiredLabels {
+		found := false
+		for _, label := range match.Labels {
+			if strings.EqualFold(required, label) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("issue is missing required label %q", required)
+		}
+	}
+	encoded, err := json.Marshal(match)
+	if err != nil || len(encoded) > maxObservationBytes {
+		return errors.New("canonical issue metadata exceeds 16 KiB")
+	}
+	return nil
+}
+
+func equalJiraIssueMatch(left, right protocol.JiraIssueMatch) bool {
+	leftJSON, _ := json.Marshal(left)
+	rightJSON, _ := json.Marshal(right)
+	return bytes.Equal(leftJSON, rightJSON)
+}
+
+func buildJiraJQL(projectKeys []string, assignee string, labels []string, state string) (string, error) {
+	statusClause := "status not in (Done, Closed)"
+	if state == "closed" {
+		statusClause = "status in (Done, Closed)"
+	}
+	parts := []string{statusClause}
+	if len(projectKeys) > 0 {
+		quoted := make([]string, 0, len(projectKeys))
+		for _, key := range projectKeys {
+			value, err := jiraQuoted(key)
+			if err != nil {
+				return "", err
+			}
+			quoted = append(quoted, value)
+		}
+		parts = append(parts, "project in ("+strings.Join(quoted, ", ")+")")
+	}
+	for _, label := range labels {
+		value, err := jiraQuoted(label)
+		if err != nil {
+			return "", err
+		}
+		parts = append(parts, "labels = "+value)
+	}
+	if assignee != "" && !strings.EqualFold(assignee, "currentUser()") {
+		value, err := jiraQuoted(assignee)
+		if err != nil {
+			return "", err
+		}
+		parts = append(parts, "assignee = "+value)
+	} else {
+		parts = append(parts, "assignee = currentUser()")
+	}
+	jql := strings.Join(parts, " AND ")
+	if len([]byte(jql)) > 4<<10 {
+		return "", errors.New("composed JQL exceeds 4 KiB")
+	}
+	return jql, nil
+}
+
+func jiraQuoted(value string) (string, error) {
+	if value == "" || value != strings.TrimSpace(value) {
+		return "", errors.New("Jira JQL values must be trimmed and nonblank")
+	}
+	if strings.ContainsAny(value, `"'\\()[]`) {
+		return "", errors.New("Jira JQL values may not contain quotes, backslashes, or parentheses")
+	}
+	return `"` + value + `"`, nil
+}
+
 func truncateAutomationDiagnostic(value string) string {
 	if len([]byte(value)) <= automationDiagnosticLimit {
 		return value
@@ -509,6 +876,7 @@ type automationEvaluation struct {
 type AutomationService struct {
 	store       *Store
 	runner      githubIssueLister
+	jiraRunner  jiraIssueLister
 	logger      *slog.Logger
 	wake        chan struct{}
 	slots       chan struct{}
@@ -530,15 +898,25 @@ func NewAutomationService(store *Store, logger *slog.Logger) *AutomationService 
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return newAutomationService(store, logger, newGitHubIssueRunner())
+	return newAutomationServiceWithRunners(store, logger, newGitHubIssueRunner(), newJiraRunner())
 }
 
 func newAutomationService(store *Store, logger *slog.Logger, runner githubIssueLister) *AutomationService {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	return newAutomationServiceWithRunners(store, logger, runner, newJiraRunner())
+}
+
+func newAutomationServiceWithRunners(
+	store *Store, logger *slog.Logger,
+	runner githubIssueLister, jiraRunner jiraIssueLister,
+) *AutomationService {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &AutomationService{
-		store: store, runner: runner, logger: logger,
+		store: store, runner: runner, jiraRunner: jiraRunner, logger: logger,
 		wake: make(chan struct{}, 1), slots: make(chan struct{}, maxConcurrentAutomationChecks),
 		admitting: true, cancel: make(map[string]automationCancellation),
 	}
@@ -658,6 +1036,15 @@ func (service *AutomationService) Test(
 			result.Matches = append(result.Matches, protocol.AutomationMatch{
 				Number: match.Number, Title: match.Title, URL: match.URL, State: match.State,
 				Labels: match.Labels, IsDraft: &draft, BaseBranch: match.BaseBranch, HeadCommit: match.HeadCommit,
+			})
+		}
+	case protocol.AutomationTriggerJiraIssue:
+		var matches []protocol.JiraIssueMatch
+		matches, err = service.jiraRunner.Search(ctx, detail.Automation.Trigger.JiraIssue())
+		for _, match := range matches {
+			result.Matches = append(result.Matches, protocol.AutomationMatch{
+				Key: match.Key, Summary: match.Summary, URL: match.URL, State: match.Status,
+				Assignee: match.Assignee, Labels: match.Labels,
 			})
 		}
 	default:
@@ -786,6 +1173,7 @@ func (service *AutomationService) evaluate(ctx context.Context, evaluation autom
 	}
 	var issueMatches []protocol.GitHubIssueMatch
 	var pullRequestMatches []protocol.GitHubPullRequestMatch
+	var jiraMatches []protocol.JiraIssueMatch
 	switch evaluation.Automation.Trigger.Type {
 	case protocol.AutomationTriggerGitHubIssue:
 		issueMatches, err = service.runner.ListIssues(checkContext, evaluation.Automation.RepositoryIdentity, evaluation.Automation.Trigger.GitHubIssue())
@@ -795,6 +1183,11 @@ func (service *AutomationService) evaluate(ctx context.Context, evaluation autom
 			err = errors.New("GitHub pull-request evaluator is unavailable")
 		} else {
 			pullRequestMatches, err = lister.ListPullRequests(checkContext, evaluation.Automation.RepositoryIdentity, evaluation.Automation.Trigger.GitHubPullRequest())
+		}
+	case protocol.AutomationTriggerJiraIssue:
+		jiraMatches, err = service.jiraRunner.Search(checkContext, evaluation.Automation.Trigger.JiraIssue())
+		if err == nil {
+			jiraMatches, err = service.attachJiraDescriptions(checkContext, evaluation, jiraMatches)
 		}
 	default:
 		err = errors.New("Automation has an unsupported trigger type")
@@ -808,19 +1201,76 @@ func (service *AutomationService) evaluate(ctx context.Context, evaluation autom
 		}
 		var checkErr *automationCheckError
 		if !errors.As(err, &checkErr) {
-			checkErr = &automationCheckError{code: "gh_failed", message: truncateAutomationDiagnostic(err.Error())}
+			checkErr = &automationCheckError{code: "automation_failed", message: truncateAutomationDiagnostic(err.Error())}
 		}
 		_ = service.store.completeAutomationFailure(context.Background(), evaluation, checkErr)
 		return
 	}
-	if evaluation.Automation.Trigger.Type == protocol.AutomationTriggerGitHubIssue {
+	switch evaluation.Automation.Trigger.Type {
+	case protocol.AutomationTriggerGitHubIssue:
 		err = service.store.completeAutomationSuccess(context.Background(), evaluation, issueMatches)
-	} else {
+	case protocol.AutomationTriggerGitHubPullRequest:
 		err = service.store.completePullRequestAutomationSuccess(context.Background(), evaluation, pullRequestMatches)
+	case protocol.AutomationTriggerJiraIssue:
+		err = service.store.completeJiraIssueAutomationSuccess(context.Background(), evaluation, jiraMatches)
 	}
 	if err != nil && ctx.Err() == nil {
 		service.logger.Error("automation_check_commit_failed", "automation_id", evaluation.Automation.ID, "error_class", "storage_unavailable")
 	}
+}
+
+func (service *AutomationService) attachJiraDescriptions(
+	ctx context.Context,
+	evaluation automationEvaluation,
+	matches []protocol.JiraIssueMatch,
+) ([]protocol.JiraIssueMatch, error) {
+	newMatches, err := service.store.filterNewJiraIssueMatches(ctx, evaluation.Automation.ID, matches)
+	if err != nil {
+		return nil, err
+	}
+	for index := range newMatches {
+		description, err := service.jiraRunner.View(ctx, newMatches[index].Key)
+		if err != nil {
+			return nil, err
+		}
+		newMatches[index].Description = description
+	}
+	return newMatches, nil
+}
+
+func (s *Store) filterNewJiraIssueMatches(
+	ctx context.Context,
+	automationID string,
+	matches []protocol.JiraIssueMatch,
+) ([]protocol.JiraIssueMatch, error) {
+	if len(matches) == 0 {
+		return matches, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT issue_key FROM automation_jira_issue_occurrences WHERE automation_id = ?
+	`, automationID)
+	if err != nil {
+		return nil, unavailable(err)
+	}
+	seen := make(map[string]bool, len(matches))
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			rows.Close()
+			return nil, unavailable(err)
+		}
+		seen[key] = true
+	}
+	if err := rows.Close(); err != nil {
+		return nil, unavailable(err)
+	}
+	newMatches := make([]protocol.JiraIssueMatch, 0, len(matches))
+	for _, match := range matches {
+		if !seen[match.Key] {
+			newMatches = append(newMatches, match)
+		}
+	}
+	return newMatches, nil
 }
 
 func (s *Store) recoverAutomationRuntime(ctx context.Context) error {
@@ -871,7 +1321,7 @@ func (s *Store) reserveDueAutomation(ctx context.Context) (automationEvaluation,
 	result, err := tx.ExecContext(ctx, `
 		UPDATE automations
 		SET evaluation_token = ?, evaluation_started_at = ?, health_status = 'checking',
-		    health_code = '', health_message = 'Checking GitHub now.'
+		    health_code = '', health_message = 'Checking the provider now.'
 		WHERE id = ? AND enabled = 1 AND evaluation_token IS NULL
 	`, token, now, id)
 	if err != nil {
@@ -1199,6 +1649,125 @@ func (s *Store) completePullRequestAutomationSuccess(
 	return tx.Commit()
 }
 
+func (s *Store) completeJiraIssueAutomationSuccess(
+	ctx context.Context,
+	evaluation automationEvaluation,
+	matches []protocol.JiraIssueMatch,
+) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return unavailable(err)
+	}
+	defer tx.Rollback()
+	var eligible int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM automations automation
+		JOIN workflows workflow ON workflow.id = automation.workflow_id AND workflow.enabled = 1
+		JOIN repositories repository ON repository.id = automation.repository_id AND repository.enabled = 1
+		WHERE automation.id = ? AND automation.enabled = 1 AND automation.evaluation_token = ?
+		  AND automation.trigger_type = 'jira_issue'
+	`, evaluation.Automation.ID, evaluation.Token).Scan(&eligible); err != nil {
+		return unavailable(err)
+	}
+	if eligible == 0 {
+		return nil
+	}
+	newMatches := make([]protocol.JiraIssueMatch, 0, len(matches))
+	for _, match := range matches {
+		var exists int
+		if err := tx.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM automation_jira_issue_occurrences
+			WHERE automation_id = ? AND issue_key = ?
+		`, evaluation.Automation.ID, match.Key).Scan(&exists); err != nil {
+			return unavailable(err)
+		}
+		if exists == 0 {
+			newMatches = append(newMatches, match)
+		}
+	}
+	var occurrenceCount int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM automation_occurrences`).Scan(&occurrenceCount); err != nil {
+		return unavailable(err)
+	}
+	if occurrenceCount+len(newMatches) > protocol.MaxAutomationOccurrences {
+		return s.completeAutomationFailureTx(ctx, tx, evaluation, &automationCheckError{
+			code: "occurrence_limit_reached", message: "The durable Occurrence limit has been reached. Archive history before retrying.",
+		})
+	}
+	now := s.now().UnixMilli()
+	configuredAssignee := evaluation.Automation.Trigger.Assignee
+	requiredLabels, _ := json.Marshal(evaluation.Automation.Trigger.RequiredLabels)
+	for _, match := range newMatches {
+		occurrenceID, err := newID()
+		if err != nil {
+			return unavailable(err)
+		}
+		observedLabels, err := json.Marshal(match.Labels)
+		if err != nil {
+			return unavailable(err)
+		}
+		prompt, err := protocol.ResolveJiraIssueAutomationPrompt(
+			evaluation.WorkflowInstructions, evaluation.Automation.Context,
+			configuredAssignee, evaluation.Automation.Trigger.RequiredLabels, match,
+		)
+		state, diagnostic := "pending", ""
+		var storedPrompt any = prompt
+		title := evaluation.Automation.Title + ": Jira " + match.Key
+		if err != nil || len([]byte(prompt)) > protocol.MaxResolvedPromptBytes ||
+			!protocol.AgentPromptFits(title, evaluation.Automation.RepositoryIdentity, prompt) {
+			state, diagnostic, storedPrompt = "failed", "resolved_prompt_too_large", nil
+		}
+		requestKey := "automation:" + evaluation.Automation.ID + ":jira_issue:" + match.Key
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO automation_occurrences(
+				id, automation_id, automation_version, automation_title,
+				workflow_revision_id, repository_id, repository_identity,
+				context, timeout_seconds, state, resolved_prompt, task_request_key,
+				diagnostic, retry_at, created_at, updated_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`, occurrenceID, evaluation.Automation.ID, evaluation.Automation.Version,
+			evaluation.Automation.Title, evaluation.WorkflowRevisionID,
+			evaluation.Automation.RepositoryID, evaluation.Automation.RepositoryIdentity,
+			evaluation.Automation.Context, evaluation.Automation.TimeoutSeconds,
+			state, storedPrompt, requestKey, diagnostic, now, now, now); err != nil {
+			return unavailable(err)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO automation_jira_issue_occurrences(
+				occurrence_id, automation_id, issue_key, issue_url, issue_title,
+				issue_summary, issue_description, observed_status, observed_assignee,
+				observed_labels_json, configured_assignee, required_labels_json
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`, occurrenceID, evaluation.Automation.ID, match.Key, match.URL, match.Summary,
+			match.Summary, match.Description, match.Status, match.Assignee,
+			observedLabels, configuredAssignee, requiredLabels); err != nil {
+			return unavailable(err)
+		}
+	}
+	result, err := tx.ExecContext(ctx, `
+		UPDATE automations
+		SET evaluation_token = NULL, evaluation_started_at = NULL,
+		    last_checked_at = ?, next_check_at = ?, health_status = 'healthy',
+		    health_code = '', health_message = ?, matched_count = matched_count + ?,
+		    skipped_count = skipped_count + ?
+		WHERE id = ? AND enabled = 1 AND evaluation_token = ?
+	`, now, now+int64(evaluation.Automation.Trigger.PollIntervalSeconds)*1000,
+		fmt.Sprintf("Jira check completed with %d matching issue(s).", len(matches)),
+		len(matches), len(matches)-len(newMatches), evaluation.Automation.ID, evaluation.Token)
+	if err != nil {
+		return unavailable(err)
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return unavailable(err)
+	}
+	if changed != 1 {
+		return nil
+	}
+	return tx.Commit()
+}
+
 func (s *Store) completeAutomationFailureTx(
 	ctx context.Context,
 	tx *sql.Tx,
@@ -1278,6 +1847,7 @@ func (s *Store) dispatchOccurrence(ctx context.Context, occurrenceID string) err
 	var contextValue, prompt, requestKey string
 	var timeoutSeconds int
 	var issueNumber, pullRequestNumber, scheduledAt sql.NullInt64
+	var issueKey sql.NullString
 	var scheduleKind, runRequestKey sql.NullString
 	var workflowID, workflowTitle string
 	var workflowRevisionNumber, automationEnabled, workflowEnabled, repositoryEnabled int
@@ -1288,6 +1858,7 @@ func (s *Store) dispatchOccurrence(ctx context.Context, occurrenceID string) err
 		       occurrence.timeout_seconds, occurrence.resolved_prompt,
 		       occurrence.task_request_key,
 		       issue.issue_number, pull_request.pull_request_number,
+		       jira.issue_key,
 		       schedule.kind, schedule.scheduled_at, schedule.run_request_key,
 		       revision.workflow_id, revision.title, revision.revision_number,
 		       automation.enabled, workflow.enabled, repository.enabled
@@ -1297,6 +1868,8 @@ func (s *Store) dispatchOccurrence(ctx context.Context, occurrenceID string) err
 		  ON issue.occurrence_id = occurrence.id AND automation.trigger_type = 'github_issue'
 		LEFT JOIN automation_github_pull_request_occurrences pull_request
 		  ON pull_request.occurrence_id = occurrence.id AND automation.trigger_type = 'github_pull_request'
+		LEFT JOIN automation_jira_issue_occurrences jira
+		  ON jira.occurrence_id = occurrence.id AND automation.trigger_type = 'jira_issue'
 		LEFT JOIN automation_schedule_occurrences schedule
 		  ON schedule.occurrence_id = occurrence.id AND automation.trigger_type = 'schedule'
 		JOIN workflow_revisions revision ON revision.id = occurrence.workflow_revision_id
@@ -1306,7 +1879,8 @@ func (s *Store) dispatchOccurrence(ctx context.Context, occurrenceID string) err
 	`, occurrenceID).Scan(
 		&automationID, &automationTitle, &triggerType, &workflowRevisionID, &repositoryID,
 		&repositoryIdentity, &contextValue, &timeoutSeconds, &prompt, &requestKey,
-		&issueNumber, &pullRequestNumber, &scheduleKind, &scheduledAt, &runRequestKey,
+		&issueNumber, &pullRequestNumber, &issueKey,
+		&scheduleKind, &scheduledAt, &runRequestKey,
 		&workflowID, &workflowTitle, &workflowRevisionNumber,
 		&automationEnabled, &workflowEnabled, &repositoryEnabled,
 	)
@@ -1331,6 +1905,11 @@ func (s *Store) dispatchOccurrence(ctx context.Context, occurrenceID string) err
 			return unavailable(errors.New("GitHub pull-request Occurrence is missing typed identity"))
 		}
 		title = automationTitle + ": GitHub pull request #" + strconv.Itoa(int(pullRequestNumber.Int64))
+	case protocol.AutomationTriggerJiraIssue:
+		if !issueKey.Valid || issueKey.String == "" {
+			return unavailable(errors.New("Jira issue Occurrence is missing typed identity"))
+		}
+		title = automationTitle + ": Jira " + issueKey.String
 	case protocol.AutomationTriggerSchedule:
 		if !scheduleKind.Valid {
 			return unavailable(errors.New("schedule Occurrence is missing typed identity"))
