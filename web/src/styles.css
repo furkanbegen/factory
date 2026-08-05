@@ -313,6 +313,8 @@ button { color: inherit; }
 .automation-confirm p { margin: 4px 0 8px; color: var(--fg-3); }
 .confirmation-check { display: flex; align-items: center; gap: 8px; color: var(--fg-2); }
 .confirmation-check input { accent-color: var(--accent); }
+.delegate-repo-set { display: grid; gap: 6px; margin-top: 5px; }
+.delegate-repo-set .confirmation-check { font-size: 12px; }
 .automation-health-card > p { margin: 0 0 14px; color: var(--fg-2); }
 .automation-health-card > p.health-error { color: var(--failed); }
 .automation-metrics { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 1px; background: var(--line); }

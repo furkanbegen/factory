@@ -118,21 +118,65 @@ func (s *Store) Claim(ctx context.Context, workerID string, input protocol.Claim
 		      JOIN executions active_execution ON active_execution.id = active_attempt.execution_id
 		      JOIN tasks active_task ON active_task.id = active_execution.task_id
 		      WHERE active_attempt.worker_id = e.assigned_worker_id
-		        AND active_task.repository_id = t.repository_id
 		        AND active_attempt.state IN ('preparing', 'running')
+		        AND (active_task.repository_id = t.repository_id
+		             OR EXISTS (
+		                 SELECT 1 FROM task_repository_sets active_set
+		                 WHERE active_set.task_id = active_task.id AND active_set.repository_id = t.repository_id
+		             ))
 		  ) + (
 		      SELECT COUNT(*)
 		      FROM attempts terminal_attempt
 		      JOIN executions terminal_execution ON terminal_execution.id = terminal_attempt.execution_id
 		      JOIN tasks terminal_task ON terminal_task.id = terminal_execution.task_id
 		      WHERE terminal_attempt.worker_id = e.assigned_worker_id
-		        AND terminal_task.repository_id = t.repository_id
 		        AND terminal_attempt.state IN ('succeeded', 'failed', 'cancelled', 'lost')
 		        AND terminal_attempt.capacity_acknowledged = 0
+		        AND (terminal_task.repository_id = t.repository_id
+		             OR EXISTS (
+		                 SELECT 1 FROM task_repository_sets terminal_set
+		                 WHERE terminal_set.task_id = terminal_task.id AND terminal_set.repository_id = t.repository_id
+		             ))
 		  ) < ?
+		  AND NOT EXISTS (
+		      SELECT 1
+		      FROM task_repository_sets ts
+		      LEFT JOIN worker_repositories twr
+		        ON twr.worker_id = e.assigned_worker_id AND twr.repository_id = ts.repository_id
+		      WHERE ts.task_id = t.id
+		        AND (
+		            COALESCE(twr.advertised, 0) = 0
+		            OR COALESCE(twr.retained_count, 0) + (
+		                SELECT COUNT(*)
+		                FROM attempts active_attempt
+		                JOIN executions active_execution ON active_execution.id = active_attempt.execution_id
+		                JOIN tasks active_task ON active_task.id = active_execution.task_id
+		                WHERE active_attempt.worker_id = e.assigned_worker_id
+		                  AND active_attempt.state IN ('preparing', 'running')
+		                  AND (active_task.repository_id = ts.repository_id
+		                       OR EXISTS (
+		                           SELECT 1 FROM task_repository_sets active_set
+		                           WHERE active_set.task_id = active_task.id AND active_set.repository_id = ts.repository_id
+		                       ))
+		            ) + (
+		                SELECT COUNT(*)
+		                FROM attempts terminal_attempt
+		                JOIN executions terminal_execution ON terminal_execution.id = terminal_attempt.execution_id
+		                JOIN tasks terminal_task ON terminal_task.id = terminal_execution.task_id
+		                WHERE terminal_attempt.worker_id = e.assigned_worker_id
+		                  AND terminal_attempt.state IN ('succeeded', 'failed', 'cancelled', 'lost')
+		                  AND terminal_attempt.capacity_acknowledged = 0
+		                  AND (terminal_task.repository_id = ts.repository_id
+		                       OR EXISTS (
+		                           SELECT 1 FROM task_repository_sets terminal_set
+		                           WHERE terminal_set.task_id = terminal_task.id AND terminal_set.repository_id = ts.repository_id
+		                       ))
+		            ) >= ?
+		        )
+		  )
 		ORDER BY e.created_at, e.id
 		LIMIT 1
-	`, workerID, runtime, protocol.MaxRetainedPerRepo).Scan(&executionID)
+	`, workerID, runtime, protocol.MaxRetainedPerRepo, protocol.MaxRetainedPerRepo).Scan(&executionID)
 	if errors.Is(err, sql.ErrNoRows) {
 		if err := insertEmptyClaim(ctx, tx, workerID, input.RequestID, digest, nowMillis); err != nil {
 			return nil, err
@@ -243,7 +287,41 @@ func (s *Store) claimDetail(ctx context.Context, attemptID string) (protocol.Cla
 	if err != nil {
 		return claim, unavailable(err)
 	}
+	claim.AdditionalRepositories, err = s.additionalRepositoriesForTask(ctx, claim.Execution.TaskID, claim.Attempt.WorkerID)
+	if err != nil {
+		return claim, unavailable(err)
+	}
 	return claim, nil
+}
+
+func (s *Store) additionalRepositoriesForTask(
+	ctx context.Context,
+	taskID, workerID string,
+) ([]protocol.Repository, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT r.id, COALESCE(wr.display_key, r.remote_identity),
+		       COALESCE(NULLIF(wr.worker_remote_identity, ''), r.remote_identity),
+		       COALESCE(wr.retained_count, 0)
+		FROM task_repository_sets ts
+		JOIN repositories r ON r.id = ts.repository_id
+		LEFT JOIN worker_repositories wr
+		  ON wr.worker_id = ? AND wr.repository_id = ts.repository_id
+		WHERE ts.task_id = ?
+		ORDER BY ts.seq
+	`, workerID, taskID)
+	if err != nil {
+		return nil, unavailable(err)
+	}
+	defer rows.Close()
+	var repositories []protocol.Repository
+	for rows.Next() {
+		var repository protocol.Repository
+		if err := rows.Scan(&repository.ID, &repository.Key, &repository.RemoteIdentity, &repository.RetainedCount); err != nil {
+			return nil, unavailable(err)
+		}
+		repositories = append(repositories, repository)
+	}
+	return repositories, rows.Err()
 }
 
 type leaseState struct {
@@ -672,6 +750,29 @@ func (s *Store) RetryExecution(ctx context.Context, executionID string) (protoco
 			WHERE worker_id = ? AND repository_id = ? AND dynamic = 1
 		`, now, workerID, repositoryID); err != nil {
 			return protocol.TaskDetail{}, unavailable(err)
+		}
+	}
+	setRepositoryIDs, err := s.repositorySetIDsForTask(ctx, taskID)
+	if err != nil {
+		return protocol.TaskDetail{}, err
+	}
+	if len(setRepositoryIDs) > 0 {
+		var acceptsManagedRepositories int
+		if err := tx.QueryRowContext(ctx, `SELECT accepts_managed_repositories FROM workers WHERE id = ?`, workerID).Scan(&acceptsManagedRepositories); err != nil {
+			return protocol.TaskDetail{}, unavailable(err)
+		}
+		acquirable, err := s.workerCanAcquireRepositorySet(ctx, tx, workerID, acceptsManagedRepositories != 0, setRepositoryIDs)
+		if err != nil {
+			return protocol.TaskDetail{}, err
+		}
+		if !acquirable {
+			return protocol.TaskDetail{}, conflict(
+				"retry_repository_unavailable",
+				"the frozen worker cannot currently reserve every repository in the task set",
+			)
+		}
+		if err := s.reserveRepositorySet(ctx, tx, workerID, setRepositoryIDs, now); err != nil {
+			return protocol.TaskDetail{}, err
 		}
 	}
 	if _, err := tx.ExecContext(ctx, `

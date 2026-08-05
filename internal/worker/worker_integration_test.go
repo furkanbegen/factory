@@ -1760,8 +1760,12 @@ func TestDirtyAndUnpublishedSuccessesAreRetained(t *testing.T) {
 		waitFor(t, 5*time.Second, func() bool {
 			manager.stateMutex.Lock()
 			defer manager.stateMutex.Unlock()
-			_, retained := manager.retained[attempt.ID]
-			return retained
+			for _, retainedWorktree := range manager.retained {
+				if retainedWorktree.AttemptID == attempt.ID {
+					return true
+				}
+			}
+			return false
 		})
 		taskID := dirty.Task.ID
 		if attempt.ID == unpublished.Attempts[0].ID {

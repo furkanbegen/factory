@@ -67,6 +67,7 @@ export interface Task {
   description?: string;
   worker_id: string;
   repository_id: string;
+  repository_set?: string[];
   timeout_seconds: number;
   state: TaskState;
   created_at: string;
@@ -107,6 +108,7 @@ export interface TaskDetail {
   context: string;
   execution: Execution;
   repository: Repository;
+  additional_repositories?: Repository[];
   repository_available: boolean;
   attempts: Attempt[] | null;
   workflow?: TaskWorkflowSnapshot;
@@ -392,6 +394,7 @@ interface CreateTaskBaseInput {
   title: string;
   worker_id: string;
   repository_id: string;
+  repository_set_ids?: string[];
   timeout_seconds: number;
 }
 

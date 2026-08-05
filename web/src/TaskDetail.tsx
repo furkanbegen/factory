@@ -239,6 +239,9 @@ export function TaskDetail({
             <div><dt>Runtime</dt><dd>{runtimeLabel(data.execution.required_runtime)}</dd></div>
             <div><dt>Repository</dt><dd>{data.repository.key}</dd></div>
             <div><dt>Remote</dt><dd className="break-anywhere">{data.repository.remote_identity}</dd></div>
+            {(data.additional_repositories?.length ?? 0) > 0 && (
+              <div><dt>Repository set</dt><dd>{data.additional_repositories!.map((repo) => `${repo.key} · ${repo.remote_identity}`).join("\n")}</dd></div>
+            )}
             <div><dt>Timeout</dt><dd>{formatTimeout(data.task.timeout_seconds)}</dd></div>
             <div><dt>Elapsed</dt><dd>{taskElapsed(data)}</dd></div>
             <div><dt>Workflow</dt><dd>{data.workflow ? `${data.workflow.title} · revision ${data.workflow.revision_number}` : "Blank task"}</dd></div>

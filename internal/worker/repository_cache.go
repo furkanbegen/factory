@@ -59,9 +59,15 @@ func (manager *Manager) repositoryForClaim(ctx context.Context, claim protocol.C
 		if !sameRemoteIdentity(repository.RemoteIdentity, claim.Repository.RemoteIdentity) {
 			return Repository{}, errors.New("claim repository identity does not match the configured repository")
 		}
+		repository.ID = claim.Repository.ID
 		return repository, nil
 	}
-	return manager.acquireManagedRepository(ctx, claim.Repository)
+	repository, err := manager.acquireManagedRepository(ctx, claim.Repository)
+	if err != nil {
+		return Repository{}, err
+	}
+	repository.ID = claim.Repository.ID
+	return repository, nil
 }
 
 func (manager *Manager) acquireManagedRepository(

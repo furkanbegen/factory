@@ -36,6 +36,7 @@ export function DelegateModal({
   const requestRef = useRef<{ fingerprint: string; key: string } | undefined>(undefined);
   const [workerID, setWorkerID] = useState(initialWorkerID ?? "");
   const [repositoryID, setRepositoryID] = useState("");
+  const [additionalRepositoryIDs, setAdditionalRepositoryIDs] = useState<string[]>([]);
   const [timeout, setTimeout] = useState("7200");
   const [workflowRevisionID, setWorkflowRevisionID] = useState("");
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -45,6 +46,12 @@ export function DelegateModal({
     queryKey: ["workflows", "enabled"],
     queryFn: api.allEnabledWorkflows,
   });
+  const managedRepositories = useQuery({
+    queryKey: ["repositories"],
+    queryFn: api.repositories,
+  });
+  const additionalRepositories = (managedRepositories.data ?? [])
+    .filter((repo) => repo.enabled && repo.id !== repositoryID);
 
   useEffect(() => {
     titleRef.current?.focus();
@@ -91,6 +98,8 @@ export function DelegateModal({
     if (!context.trim()) nextErrors.description = "Enter task context.";
     if (!workerID) nextErrors.worker = "Choose a worker.";
     if (!repositoryID) nextErrors.repository = "Choose a repository.";
+    if (additionalRepositoryIDs.length > 5) nextErrors.additional = "Use at most 5 additional repositories.";
+    if (additionalRepositoryIDs.includes(repositoryID)) nextErrors.additional = "The primary repository is already in the set.";
     const timeoutSeconds = Number(timeout);
     if (!Number.isInteger(timeoutSeconds) || timeoutSeconds < 1 || timeoutSeconds > 28_800) {
       nextErrors.timeout = "Choose a timeout from one minute to eight hours.";
@@ -101,6 +110,7 @@ export function DelegateModal({
       title,
       worker_id: workerID,
       repository_id: repositoryID,
+      repository_set_ids: additionalRepositoryIDs,
       timeout_seconds: timeoutSeconds,
       ...(workflowRevisionID
         ? { context, workflow_revision_id: workflowRevisionID }
@@ -173,6 +183,7 @@ export function DelegateModal({
                 onChange={(event) => {
                   setWorkerID(event.target.value);
                   setRepositoryID("");
+                  setAdditionalRepositoryIDs([]);
                 }}
                 disabled={workersPending || workers.length === 0}
               >
@@ -195,6 +206,23 @@ export function DelegateModal({
                 <option value="">{workerID ? (repositories.length ? "Choose a repository" : "No repositories advertised") : "Choose a worker first"}</option>
                 {repositories.map((repo) => <option key={repo.id} value={repo.id}>{repo.key} · {repo.remote_identity}</option>)}
               </select>
+            </Field>
+            <Field label="Additional repositories" htmlFor="delegate-additional" error={errors.additional} hint="Optional · up to 5 · chosen from the enabled managed catalog. The worker clones each on demand and the agent gets one worktree per repository.">
+              <div id="delegate-additional" className="delegate-repo-set">
+                {managedRepositories.isPending ? <span className="field-hint">Loading managed repositories…</span> : additionalRepositories.length === 0 ? <span className="field-hint">{managedRepositories.error ? "Failed to load the managed catalog." : repositoryID ? "No other enabled managed repositories." : "Choose a primary repository first."}</span> : additionalRepositories.map((repo) => (
+                  <label className="confirmation-check" key={repo.id}>
+                    <input
+                      type="checkbox"
+                      checked={additionalRepositoryIDs.includes(repo.id)}
+                      onChange={(event) => setAdditionalRepositoryIDs((current) =>
+                        event.target.checked
+                          ? [...current, repo.id]
+                          : current.filter((id) => id !== repo.id))}
+                    />
+                    {repo.remote_identity}
+                  </label>
+                ))}
+              </div>
             </Field>
             <Field label="Timeout" htmlFor="delegate-timeout" error={errors.timeout}>
               <select id="delegate-timeout" value={timeout} onChange={(event) => setTimeout(event.target.value)}>

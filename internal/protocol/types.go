@@ -41,6 +41,7 @@ const (
 	MaxAutomationOccurrences  = 100000
 	MaxAutomationContextBytes = 8 << 10
 	MaxAutomationMatches      = 100
+	MaxRepositorySetSize      = 6
 )
 
 func SupportedRuntime(value string) bool {
@@ -151,12 +152,14 @@ type CreateTaskRequest struct {
 	Context                    string     `json:"context,omitempty"`
 	WorkerID                   string     `json:"worker_id,omitempty"`
 	RepositoryID               string     `json:"repository_id,omitempty"`
+	RepositorySetIDs           []string   `json:"repository_set_ids,omitempty"`
 	Route                      *TaskRoute `json:"route,omitempty"`
 	TimeoutSeconds             int        `json:"timeout_seconds"`
 	WorkflowRevisionID         string     `json:"workflow_revision_id,omitempty"`
 	DescriptionProvided        bool       `json:"-"`
 	ContextProvided            bool       `json:"-"`
 	WorkflowRevisionIDProvided bool       `json:"-"`
+	RepositorySetIDsProvided   bool       `json:"-"`
 }
 
 func (request *CreateTaskRequest) UnmarshalJSON(data []byte) error {
@@ -175,6 +178,7 @@ func (request *CreateTaskRequest) UnmarshalJSON(data []byte) error {
 	_, request.DescriptionProvided = fields["description"]
 	_, request.ContextProvided = fields["context"]
 	_, request.WorkflowRevisionIDProvided = fields["workflow_revision_id"]
+	_, request.RepositorySetIDsProvided = fields["repository_set_ids"]
 	return nil
 }
 
@@ -190,6 +194,7 @@ type Task struct {
 	Description    string    `json:"description,omitempty"`
 	WorkerID       string    `json:"worker_id"`
 	RepositoryID   string    `json:"repository_id"`
+	RepositorySet  []string  `json:"repository_set,omitempty"`
 	TimeoutSeconds int       `json:"timeout_seconds"`
 	State          string    `json:"state"`
 	CreatedAt      time.Time `json:"created_at"`
@@ -239,14 +244,15 @@ type Attempt struct {
 }
 
 type TaskDetail struct {
-	Task                Task                  `json:"task"`
-	Context             string                `json:"context"`
-	Execution           Execution             `json:"execution"`
-	Repository          Repository            `json:"repository"`
-	RepositoryAvailable bool                  `json:"repository_available"`
-	Attempts            []Attempt             `json:"attempts"`
-	Workflow            *TaskWorkflowSnapshot `json:"workflow,omitempty"`
-	ResolvedPrompt      string                `json:"resolved_prompt"`
+	Task                   Task                  `json:"task"`
+	Context                string                `json:"context"`
+	Execution              Execution             `json:"execution"`
+	Repository             Repository            `json:"repository"`
+	AdditionalRepositories []Repository          `json:"additional_repositories,omitempty"`
+	RepositoryAvailable    bool                  `json:"repository_available"`
+	Attempts               []Attempt             `json:"attempts"`
+	Workflow               *TaskWorkflowSnapshot `json:"workflow,omitempty"`
+	ResolvedPrompt         string                `json:"resolved_prompt"`
 }
 
 type TaskWorkflowSnapshot struct {
@@ -756,10 +762,11 @@ type ClaimRequest struct {
 }
 
 type Claim struct {
-	Attempt    Attempt    `json:"attempt"`
-	Execution  Execution  `json:"execution"`
-	Task       Task       `json:"task"`
-	Repository Repository `json:"repository"`
+	Attempt                Attempt      `json:"attempt"`
+	Execution              Execution    `json:"execution"`
+	Task                   Task         `json:"task"`
+	Repository             Repository   `json:"repository"`
+	AdditionalRepositories []Repository `json:"additional_repositories,omitempty"`
 }
 
 type LeaseRequest struct {

@@ -40,6 +40,7 @@ type Config struct {
 }
 
 type Repository struct {
+	ID             string
 	Key            string
 	Path           string
 	RemoteIdentity string

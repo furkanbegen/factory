@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -53,6 +54,8 @@ type attemptManifest struct {
 	WorktreePath   string `json:"worktree_path"`
 	Branch         string `json:"branch"`
 
+	AdditionalWorktrees []manifestWorktree `json:"additional_worktrees,omitempty"`
+
 	SupervisorPID        int64     `json:"supervisor_pid,omitempty"`
 	SupervisorIdentity   string    `json:"supervisor_identity,omitempty"`
 	ProcessGroupID       int64     `json:"process_group_id,omitempty"`
@@ -67,6 +70,27 @@ type attemptManifest struct {
 	CleanupResult   string    `json:"cleanup_result,omitempty"`
 	CreatedAt       time.Time `json:"created_at"`
 	UpdatedAt       time.Time `json:"updated_at"`
+}
+
+type manifestWorktree struct {
+	RepositoryID   string `json:"repository_id"`
+	RepositoryKey  string `json:"repository_key"`
+	RepositoryPath string `json:"repository_path"`
+	RemoteIdentity string `json:"remote_identity"`
+	BaseBranch     string `json:"base_branch,omitempty"`
+	BaseCommit     string `json:"base_commit"`
+	WorktreePath   string `json:"worktree_path"`
+	Branch         string `json:"branch"`
+}
+
+func (manifest attemptManifest) manifestWorktrees() []manifestWorktree {
+	primary := manifestWorktree{
+		RepositoryID: manifest.RepositoryID, RepositoryKey: manifest.RepositoryKey,
+		RepositoryPath: manifest.RepositoryPath, RemoteIdentity: manifest.RemoteIdentity,
+		BaseBranch: manifest.BaseBranch, BaseCommit: manifest.BaseCommit,
+		WorktreePath: manifest.WorktreePath, Branch: manifest.Branch,
+	}
+	return append([]manifestWorktree{primary}, manifest.AdditionalWorktrees...)
 }
 
 type disposalJournal struct {
@@ -593,14 +617,39 @@ func (store *manifestStore) validate(manifest attemptManifest) error {
 	if !commitPattern.MatchString(manifest.BaseCommit) {
 		return errors.New("attempt manifest base commit is invalid")
 	}
-	expectedPath := filepath.Join(store.dataDirectory, "worktrees", manifest.AttemptID)
+	expectedRoot := filepath.Join(store.dataDirectory, "worktrees", manifest.AttemptID)
+	expectedPath := filepath.Join(expectedRoot, "0")
+	expectedBranch := "factory/" + manifest.TaskID[:12] + "-" + manifest.AttemptID[:12]
+	previewBranch := "factory-v2/" + manifest.TaskID[:12] + "-" + manifest.AttemptID[:12]
+	if len(manifest.AdditionalWorktrees) == 0 {
+		expectedPath = expectedRoot
+	}
 	if manifest.WorktreePath != expectedPath {
 		return errors.New("attempt manifest worktree path is not the owned Factory path")
 	}
-	expectedBranch := "factory/" + manifest.TaskID[:12] + "-" + manifest.AttemptID[:12]
-	previewBranch := "factory-v2/" + manifest.TaskID[:12] + "-" + manifest.AttemptID[:12]
 	if manifest.Branch != expectedBranch && manifest.Branch != previewBranch {
 		return errors.New("attempt manifest branch does not match its task and attempt")
+	}
+	for index, additional := range manifest.AdditionalWorktrees {
+		expectedAdditionalPath := filepath.Join(expectedRoot, strconv.Itoa(index+1))
+		if additional.WorktreePath != expectedAdditionalPath {
+			return fmt.Errorf("attempt manifest additional worktree %d path is not the owned Factory path", index+1)
+		}
+		if !uuidPattern.MatchString(additional.RepositoryID) {
+			return fmt.Errorf("attempt manifest additional worktree %d repository id is not a valid UUID", index+1)
+		}
+		if strings.TrimSpace(additional.RepositoryKey) == "" || strings.TrimSpace(additional.RemoteIdentity) == "" {
+			return fmt.Errorf("attempt manifest additional worktree %d repository identity is incomplete", index+1)
+		}
+		if !filepath.IsAbs(additional.RepositoryPath) || filepath.Clean(additional.RepositoryPath) != additional.RepositoryPath {
+			return fmt.Errorf("attempt manifest additional worktree %d repository path is not canonical", index+1)
+		}
+		if !commitPattern.MatchString(additional.BaseCommit) {
+			return fmt.Errorf("attempt manifest additional worktree %d base commit is invalid", index+1)
+		}
+		if additional.Branch != expectedBranch && additional.Branch != previewBranch {
+			return fmt.Errorf("attempt manifest additional worktree %d branch does not match its task and attempt", index+1)
+		}
 	}
 	allowedLifecycle := map[string]bool{
 		manifestPreparing: true, manifestWorktreeCreated: true, manifestSupervisorReady: true,

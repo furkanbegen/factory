@@ -1207,10 +1207,14 @@ func (s *Store) RegisterWorker(ctx context.Context, workerID string, input proto
 			      FROM executions execution
 			      JOIN tasks task ON task.id = execution.task_id
 			      WHERE execution.assigned_worker_id = ?
-			        AND task.repository_id = ?
+			        AND (task.repository_id = ?
+			             OR EXISTS (
+			                 SELECT 1 FROM task_repository_sets reservation_set
+			                 WHERE reservation_set.task_id = task.id AND reservation_set.repository_id = ?
+			             ))
 			        AND execution.state IN ('queued', 'preparing', 'running')
 			  )
-		`, now, workerID, repositoryID, workerID, repositoryID)
+		`, now, workerID, repositoryID, workerID, repositoryID, repositoryID)
 		if err != nil {
 			return protocol.Worker{}, unavailable(err)
 		}
@@ -1460,6 +1464,33 @@ func normalizeTaskRoute(route *protocol.TaskRoute) error {
 	return nil
 }
 
+func normalizeRepositorySetIDs(primaryID string, ids []string) ([]string, error) {
+	normalized := make([]string, 0, len(ids))
+	seen := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" || len(id) > 200 {
+			return nil, invalid("invalid_repository_set", "repository_set_ids entries must be trimmed, nonblank, and at most 200 bytes")
+		}
+		if id == primaryID {
+			return nil, invalid("invalid_repository_set", "repository_set_ids may not repeat the primary repository")
+		}
+		if seen[id] {
+			return nil, invalid("invalid_repository_set", "repository_set_ids must be unique")
+		}
+		seen[id] = true
+		normalized = append(normalized, id)
+	}
+	if len(normalized) > protocol.MaxRepositorySetSize-1 {
+		return nil, invalid(
+			"invalid_repository_set",
+			fmt.Sprintf("repository_set_ids may contain at most %d additional repositories", protocol.MaxRepositorySetSize-1),
+		)
+	}
+	sort.Strings(normalized)
+	return normalized, nil
+}
+
 func hasSourceAccess(values []protocol.SourceAccess, required protocol.SourceAccess) bool {
 	for _, value := range values {
 		if value == required {
@@ -1481,7 +1512,7 @@ func (s *Store) selectTaskRoute(
 	route protocol.TaskRoute,
 	now int64,
 ) (taskRouteCandidate, error) {
-	return s.selectTaskRouteWithSourceRequirement(ctx, tx, route, now, true)
+	return s.selectTaskRouteWithSourceRequirement(ctx, tx, route, now, true, nil)
 }
 
 func (s *Store) selectTaskRouteWithSourceRequirement(
@@ -1490,6 +1521,7 @@ func (s *Store) selectTaskRouteWithSourceRequirement(
 	route protocol.TaskRoute,
 	now int64,
 	requireSourceAccess bool,
+	repositorySetIDs []string,
 ) (taskRouteCandidate, error) {
 	repositoryPredicate := "r.remote_identity = ?"
 	if route.SourceAccess.Provider == "github" && route.SourceAccess.Hostname == "github.com" {
@@ -1607,6 +1639,15 @@ func (s *Store) selectTaskRouteWithSourceRequirement(
 		if requireSourceAccess && !hasSourceAccess(access, route.SourceAccess) {
 			continue
 		}
+		if len(repositorySetIDs) > 0 {
+			acquirable, err := s.workerCanAcquireRepositorySet(ctx, tx, candidate.workerID, acceptsManagedRepositories != 0, repositorySetIDs)
+			if err != nil {
+				return taskRouteCandidate{}, err
+			}
+			if !acquirable {
+				continue
+			}
+		}
 		candidate.load = active + queued
 		if !found || betterRoute(candidate, best) {
 			best = candidate
@@ -1650,7 +1691,101 @@ func (s *Store) selectTaskRouteWithSourceRequirement(
 			return taskRouteCandidate{}, unavailable(err)
 		}
 	}
+	if err := s.reserveRepositorySet(ctx, tx, best.workerID, repositorySetIDs, now); err != nil {
+		return taskRouteCandidate{}, err
+	}
 	return best, nil
+}
+
+func (s *Store) workerCanAcquireRepositorySet(
+	ctx context.Context,
+	tx *sql.Tx,
+	workerID string,
+	acceptsManaged bool,
+	repositorySetIDs []string,
+) (bool, error) {
+	for _, repositoryID := range repositorySetIDs {
+		var advertised int
+		err := tx.QueryRowContext(ctx, `
+			SELECT advertised FROM worker_repositories WHERE worker_id = ? AND repository_id = ?
+		`, workerID, repositoryID).Scan(&advertised)
+		if err == nil && advertised == 1 {
+			continue
+		}
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return false, unavailable(err)
+		}
+		if !acceptsManaged {
+			return false, nil
+		}
+		var cached, cacheUse int
+		err = tx.QueryRowContext(ctx, `
+			SELECT EXISTS (
+			           SELECT 1 FROM json_each(worker.managed_repository_ids_json) cached_repository
+			           WHERE cached_repository.value = ?
+			       ),
+			       json_array_length(worker.managed_repository_ids_json) + (
+			           SELECT COUNT(*)
+			           FROM worker_repositories reservation
+			           WHERE reservation.worker_id = worker.id
+			             AND reservation.dynamic = 1
+			             AND reservation.advertised = 1
+			             AND NOT EXISTS (
+			                 SELECT 1
+			                 FROM json_each(worker.managed_repository_ids_json) cached_repository
+			                 WHERE cached_repository.value = reservation.repository_id
+			             )
+			       )
+			FROM workers worker
+			WHERE worker.id = ?
+		`, repositoryID, workerID).Scan(&cached, &cacheUse)
+		if err != nil {
+			return false, unavailable(err)
+		}
+		if cached == 0 && cacheUse >= protocol.MaxRepositoryCacheEntries {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func (s *Store) reserveRepositorySet(
+	ctx context.Context,
+	tx *sql.Tx,
+	workerID string,
+	repositorySetIDs []string,
+	now int64,
+) error {
+	for _, repositoryID := range repositorySetIDs {
+		var advertised int
+		if err := tx.QueryRowContext(ctx, `
+			SELECT advertised FROM worker_repositories WHERE worker_id = ? AND repository_id = ?
+		`, workerID, repositoryID).Scan(&advertised); err == nil && advertised == 1 {
+			continue
+		} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return unavailable(err)
+		}
+		var identity string
+		if err := tx.QueryRowContext(ctx, `SELECT remote_identity FROM repositories WHERE id = ?`, repositoryID).Scan(&identity); err != nil {
+			return unavailable(err)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO worker_repositories(
+				worker_id, display_key, repository_id, worker_remote_identity,
+				retained_count, advertised, dynamic, updated_at
+			)
+			VALUES (?, ?, ?, ?, 0, 1, 1, ?)
+			ON CONFLICT(worker_id, repository_id) DO UPDATE SET
+				display_key=excluded.display_key,
+				worker_remote_identity=excluded.worker_remote_identity,
+				advertised=1,
+				dynamic=1,
+				updated_at=excluded.updated_at
+		`, workerID, identity, repositoryID, identity, now); err != nil {
+			return unavailable(err)
+		}
+	}
+	return nil
 }
 
 func (s *Store) CreateTask(ctx context.Context, input protocol.CreateTaskRequest) (protocol.TaskDetail, bool, error) {
@@ -1717,6 +1852,10 @@ func (s *Store) CreateTask(ctx context.Context, input protocol.CreateTaskRequest
 			return protocol.TaskDetail{}, false, err
 		}
 	}
+	repositorySetIDs, err := normalizeRepositorySetIDs(input.RepositoryID, input.RepositorySetIDs)
+	if err != nil {
+		return protocol.TaskDetail{}, false, err
+	}
 	now := s.now().UnixMilli()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -1772,7 +1911,7 @@ func (s *Store) CreateTask(ctx context.Context, input protocol.CreateTaskRequest
 	}
 	var runtime string
 	if input.Route != nil {
-		selection, routeErr := s.selectTaskRoute(ctx, tx, *input.Route, now)
+		selection, routeErr := s.selectTaskRouteWithSourceRequirement(ctx, tx, *input.Route, now, true, repositorySetIDs)
 		if routeErr != nil {
 			return protocol.TaskDetail{}, false, routeErr
 		}
@@ -1806,6 +1945,9 @@ func (s *Store) CreateTask(ctx context.Context, input protocol.CreateTaskRequest
 	if !protocol.AgentPromptFits(input.Title, repositoryRemoteIdentity, resolvedPrompt) {
 		return protocol.TaskDetail{}, false, invalid("agent_prompt_too_large", "the complete agent prompt exceeds 72 KiB")
 	}
+	if err := s.validateTaskRepositorySet(ctx, tx, input.WorkerID, repositorySetIDs, now); err != nil {
+		return protocol.TaskDetail{}, false, err
+	}
 	taskID, err := newID()
 	if err != nil {
 		return protocol.TaskDetail{}, false, unavailable(err)
@@ -1833,11 +1975,112 @@ func (s *Store) CreateTask(ctx context.Context, input protocol.CreateTaskRequest
 	if err != nil {
 		return protocol.TaskDetail{}, false, unavailable(err)
 	}
+	for index, repositoryID := range repositorySetIDs {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO task_repository_sets(task_id, repository_id, seq, is_primary)
+			VALUES (?, ?, ?, 0)
+		`, taskID, repositoryID, index+1); err != nil {
+			return protocol.TaskDetail{}, false, unavailable(err)
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return protocol.TaskDetail{}, false, unavailable(err)
 	}
 	detail, err := s.Task(ctx, taskID)
 	return detail, true, err
+}
+
+func (s *Store) validateTaskRepositorySet(
+	ctx context.Context,
+	tx *sql.Tx,
+	workerID string,
+	repositorySetIDs []string,
+	now int64,
+) error {
+	if len(repositorySetIDs) == 0 {
+		return nil
+	}
+	for _, repositoryID := range repositorySetIDs {
+		var identity string
+		err := tx.QueryRowContext(ctx, `
+			SELECT remote_identity FROM repositories WHERE id = ?
+		`, repositoryID).Scan(&identity)
+		if errors.Is(err, sql.ErrNoRows) {
+			return invalid("repository_set_repository_not_found", "an additional repository was not found in the managed catalog")
+		}
+		if err != nil {
+			return unavailable(err)
+		}
+		var advertised int
+		if err := tx.QueryRowContext(ctx, `
+			SELECT advertised FROM worker_repositories WHERE worker_id = ? AND repository_id = ?
+		`, workerID, repositoryID).Scan(&advertised); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return unavailable(err)
+		}
+		if advertised == 1 {
+			continue
+		}
+		var enabled, centrallyManaged int
+		err = tx.QueryRowContext(ctx, `
+			SELECT enabled, centrally_managed FROM repositories WHERE id = ?
+		`, repositoryID).Scan(&enabled, &centrallyManaged)
+		if err != nil {
+			return unavailable(err)
+		}
+		if centrallyManaged == 0 {
+			return conflict("repository_set_not_managed", "an additional repository is not managed by the control plane")
+		}
+		if enabled == 0 {
+			return conflict("repository_set_disabled", "an additional repository is disabled")
+		}
+		var acceptsManaged, cached, cacheUse int
+		err = tx.QueryRowContext(ctx, `
+			SELECT worker.accepts_managed_repositories,
+			       EXISTS (
+			           SELECT 1 FROM json_each(worker.managed_repository_ids_json) cached_repository
+			           WHERE cached_repository.value = ?
+			       ),
+			       json_array_length(worker.managed_repository_ids_json) + (
+			           SELECT COUNT(*)
+			           FROM worker_repositories reservation
+			           WHERE reservation.worker_id = worker.id
+			             AND reservation.dynamic = 1
+			             AND reservation.advertised = 1
+			             AND NOT EXISTS (
+			                 SELECT 1
+			                 FROM json_each(worker.managed_repository_ids_json) cached_repository
+			                 WHERE cached_repository.value = reservation.repository_id
+			             )
+			       )
+			FROM workers worker
+			WHERE worker.id = ?
+		`, repositoryID, workerID).Scan(&acceptsManaged, &cached, &cacheUse)
+		if err != nil {
+			return unavailable(err)
+		}
+		if acceptsManaged == 0 || (cached == 0 && cacheUse >= protocol.MaxRepositoryCacheEntries) {
+			return conflict(
+				"repository_set_not_acquirable",
+				"the assigned worker cannot currently acquire an additional repository",
+			)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO worker_repositories(
+				worker_id, display_key, repository_id, worker_remote_identity,
+				retained_count, advertised, dynamic, updated_at
+			)
+			VALUES (?, ?, ?, ?, 0, 1, 1, ?)
+			ON CONFLICT(worker_id, repository_id) DO UPDATE SET
+				display_key=excluded.display_key,
+				worker_remote_identity=excluded.worker_remote_identity,
+				advertised=1,
+				dynamic=1,
+				updated_at=excluded.updated_at
+		`, workerID, identity, repositoryID, identity, now); err != nil {
+			return unavailable(err)
+		}
+	}
+	return nil
 }
 
 func (s *Store) Tasks(ctx context.Context, request protocol.TaskPageRequest) (protocol.TaskPage, error) {
@@ -1872,6 +2115,13 @@ func (s *Store) Tasks(ctx context.Context, request protocol.TaskPageRequest) (pr
 	if err := rows.Err(); err != nil {
 		return protocol.TaskPage{}, unavailable(err)
 	}
+	for index := range tasks {
+		ids, err := s.repositorySetIDsForTask(ctx, tasks[index].ID)
+		if err != nil {
+			return protocol.TaskPage{}, err
+		}
+		tasks[index].RepositorySet = ids
+	}
 	page := protocol.TaskPage{Tasks: tasks}
 	if len(tasks) > request.Limit {
 		page.Tasks = tasks[:request.Limit]
@@ -1900,6 +2150,25 @@ func scanTask(row scanner, detail bool) (protocol.Task, error) {
 		task.State = "running"
 	}
 	return task, err
+}
+
+func (s *Store) repositorySetIDsForTask(ctx context.Context, taskID string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT repository_id FROM task_repository_sets WHERE task_id = ? ORDER BY seq
+	`, taskID)
+	if err != nil {
+		return nil, unavailable(err)
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, unavailable(err)
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 func nullableString(value string) any {
@@ -1972,6 +2241,10 @@ func (s *Store) Task(ctx context.Context, id string) (protocol.TaskDetail, error
 		return detail, unavailable(err)
 	}
 	detail.RepositoryAvailable = advertised != 0
+	detail.AdditionalRepositories, err = s.additionalRepositoriesForTask(ctx, id, detail.Execution.AssignedWorkerID)
+	if err != nil {
+		return detail, unavailable(err)
+	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, execution_id, worker_id, attempt_number, state, lease_expires_at,
 		       supervisor_pid, process_identity, process_group_id, result, error,

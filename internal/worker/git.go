@@ -249,23 +249,34 @@ func createWorktree(ctx context.Context, gitExecutable, root string, repository 
 	return value, nil
 }
 
+func ensureWorktreeRoot(root string) (string, error) {
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return "", fmt.Errorf("create worktree root: %w", err)
+	}
+	if info, err := os.Lstat(root); err != nil {
+		return "", fmt.Errorf("inspect worktree root: %w", err)
+	} else if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return "", errors.New("worktree root must be a real directory, not a symlink")
+	}
+	canonical, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", fmt.Errorf("canonicalize worktree root: %w", err)
+	}
+	return canonical, nil
+}
+
 func prepareWorktree(ctx context.Context, gitExecutable, root string, repository Repository, taskID, attemptID string) (worktree, error) {
+	canonicalRoot, err := ensureWorktreeRoot(root)
+	if err != nil {
+		return worktree{}, err
+	}
+	return prepareWorktreeAt(ctx, gitExecutable, filepath.Join(canonicalRoot, attemptID), repository, taskID, attemptID)
+}
+
+func prepareWorktreeAt(ctx context.Context, gitExecutable, path string, repository Repository, taskID, attemptID string) (worktree, error) {
 	if !uuidPattern.MatchString(taskID) || !uuidPattern.MatchString(attemptID) {
 		return worktree{}, errors.New("server returned an invalid task or attempt ID")
 	}
-	if err := os.MkdirAll(root, 0o700); err != nil {
-		return worktree{}, fmt.Errorf("create worktree root: %w", err)
-	}
-	if info, err := os.Lstat(root); err != nil {
-		return worktree{}, fmt.Errorf("inspect worktree root: %w", err)
-	} else if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return worktree{}, errors.New("worktree root must be a real directory, not a symlink")
-	}
-	root, err := filepath.EvalSymlinks(root)
-	if err != nil {
-		return worktree{}, fmt.Errorf("canonicalize worktree root: %w", err)
-	}
-	path := filepath.Join(root, attemptID)
 	if _, err := os.Lstat(path); err == nil {
 		return worktree{}, errors.New("attempt worktree path already exists")
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -273,6 +284,7 @@ func prepareWorktree(ctx context.Context, gitExecutable, root string, repository
 	}
 	baseBranch, base := repository.BaseBranch, repository.BaseCommit
 	if base == "" {
+		var err error
 		baseBranch, base, err = resolveBaseCommit(ctx, gitExecutable, repository)
 		if err != nil {
 			return worktree{}, err

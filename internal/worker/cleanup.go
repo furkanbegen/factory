@@ -17,14 +17,25 @@ type CleanupOptions struct {
 }
 
 type cleanupPreview struct {
-	Manifest           attemptManifest `json:"manifest"`
-	RepositoryIdentity string          `json:"repository_identity"`
-	Branch             string          `json:"branch"`
-	Commit             string          `json:"commit,omitempty"`
-	GitStatus          string          `json:"git_status"`
-	Reason             string          `json:"reason"`
-	PathExists         bool            `json:"path_exists"`
-	GitRegistered      bool            `json:"git_registered"`
+	Manifest           attemptManifest          `json:"manifest"`
+	RepositoryIdentity string                   `json:"repository_identity"`
+	Branch             string                   `json:"branch"`
+	Commit             string                   `json:"commit,omitempty"`
+	GitStatus          string                   `json:"git_status"`
+	Reason             string                   `json:"reason"`
+	PathExists         bool                     `json:"path_exists"`
+	GitRegistered      bool                     `json:"git_registered"`
+	Worktrees          []cleanupWorktreePreview `json:"worktrees,omitempty"`
+}
+
+type cleanupWorktreePreview struct {
+	RepositoryIdentity string `json:"repository_identity"`
+	Branch             string `json:"branch"`
+	Commit             string `json:"commit,omitempty"`
+	GitStatus          string `json:"git_status"`
+	Reason             string `json:"reason"`
+	PathExists         bool   `json:"path_exists"`
+	GitRegistered      bool   `json:"git_registered"`
 }
 
 func Cleanup(config Config, options CleanupOptions, output io.Writer) error {
@@ -63,21 +74,34 @@ func Cleanup(config Config, options CleanupOptions, output io.Writer) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*gitCommandTimeout)
 	defer cancel()
-	inspection, inspectErr := inspectManifestWorktree(ctx, options.GitExecutable, dataDirectory, manifest)
-	preview := cleanupPreview{
-		Manifest: manifest, RepositoryIdentity: manifest.RemoteIdentity, Branch: manifest.Branch,
-		Reason: manifest.RetentionReason, PathExists: inspection.PathExists,
-		GitRegistered: inspection.Registered,
+	inspections, inspectErr := inspectManifestWorktrees(ctx, options.GitExecutable, dataDirectory, manifest)
+	entries := manifest.manifestWorktrees()
+	preview := cleanupPreview{Manifest: manifest, Reason: manifest.RetentionReason}
+	for index, inspection := range inspections {
+		item := cleanupWorktreePreview{
+			RepositoryIdentity: entries[index].RemoteIdentity, Branch: entries[index].Branch,
+			Reason: manifest.RetentionReason, PathExists: inspection.PathExists,
+			GitRegistered: inspection.Registered,
+		}
+		if inspection.Registered {
+			item.Commit = inspection.Entry.Head
+		}
+		if inspectErr != nil || !inspection.PathExists || !inspection.Registered {
+			item.GitStatus = "unavailable"
+		} else if inspection.Status == "" {
+			item.GitStatus = "clean"
+		} else {
+			item.GitStatus = inspection.Status
+		}
+		preview.Worktrees = append(preview.Worktrees, item)
 	}
-	if inspection.Registered {
-		preview.Commit = inspection.Entry.Head
-	}
-	if inspectErr != nil || !inspection.PathExists || !inspection.Registered {
-		preview.GitStatus = "unavailable"
-	} else if inspection.Status == "" {
-		preview.GitStatus = "clean"
-	} else {
-		preview.GitStatus = inspection.Status
+	if len(preview.Worktrees) > 0 {
+		preview.RepositoryIdentity = preview.Worktrees[0].RepositoryIdentity
+		preview.Branch = preview.Worktrees[0].Branch
+		preview.Commit = preview.Worktrees[0].Commit
+		preview.GitStatus = preview.Worktrees[0].GitStatus
+		preview.PathExists = preview.Worktrees[0].PathExists
+		preview.GitRegistered = preview.Worktrees[0].GitRegistered
 	}
 	if err := writeCleanupPreview(output, preview); err != nil {
 		return err
@@ -94,20 +118,30 @@ func Cleanup(config Config, options CleanupOptions, output io.Writer) error {
 	if manifest.Lifecycle != manifestRetained && manifest.Lifecycle != manifestCleanupStarted {
 		return fmt.Errorf("attempt lifecycle %q is not eligible for cleanup", manifest.Lifecycle)
 	}
-	if !inspection.PathExists && !inspection.Registered && manifest.Lifecycle == manifestCleanupStarted {
+	anyPresent := false
+	allConsistent := true
+	for _, inspection := range inspections {
+		if inspection.PathExists || inspection.Registered {
+			anyPresent = true
+		}
+		if inspection.PathExists != inspection.Registered {
+			allConsistent = false
+		}
+	}
+	if !anyPresent && manifest.Lifecycle == manifestCleanupStarted {
 		_, err := store.update(manifest.AttemptID, func(value *attemptManifest) error {
 			value.Lifecycle = manifestCleaned
-			value.CleanupResult = "confirmed cleanup found the worktree already absent"
+			value.CleanupResult = "confirmed cleanup found the worktrees already absent"
 			value.RetentionReason = ""
 			return nil
 		})
 		return err
 	}
-	if inspection.PathExists != inspection.Registered {
+	if !allConsistent {
 		return errors.New("refuse cleanup because filesystem and Git worktree identity disagree")
 	}
-	if !inspection.PathExists {
-		return errors.New("refuse cleanup because the retained worktree is absent")
+	if !anyPresent {
+		return errors.New("refuse cleanup because the retained worktrees are absent")
 	}
 	if _, err := store.update(manifest.AttemptID, func(value *attemptManifest) error {
 		value.Lifecycle = manifestCleanupStarted
@@ -121,12 +155,20 @@ func Cleanup(config Config, options CleanupOptions, output io.Writer) error {
 	if err != nil {
 		return err
 	}
-	inspection, err = inspectManifestWorktree(ctx, options.GitExecutable, dataDirectory, manifest)
+	inspections, err = inspectManifestWorktrees(ctx, options.GitExecutable, dataDirectory, manifest)
 	if err != nil {
 		return err
 	}
-	if err := removeInspectedWorktree(ctx, options.GitExecutable, inspection, true); err != nil {
-		return err
+	for _, inspection := range inspections {
+		if !inspection.PathExists && !inspection.Registered {
+			continue
+		}
+		if !inspection.PathExists || !inspection.Registered {
+			return errors.New("refuse cleanup because a retained worktree identity is incomplete")
+		}
+		if err := removeInspectedWorktree(ctx, options.GitExecutable, inspection, true); err != nil {
+			return err
+		}
 	}
 	_, err = store.update(manifest.AttemptID, func(value *attemptManifest) error {
 		value.Lifecycle = manifestCleaned
@@ -135,8 +177,8 @@ func Cleanup(config Config, options CleanupOptions, output io.Writer) error {
 		return nil
 	})
 	if err == nil {
-		_, _ = fmt.Fprintf(output, "cleanup confirmed for attempt %s; branch %s was preserved\n",
-			manifest.AttemptID, manifest.Branch)
+		_, _ = fmt.Fprintf(output, "cleanup confirmed for attempt %s; branches were preserved\n",
+			manifest.AttemptID)
 	}
 	return err
 }

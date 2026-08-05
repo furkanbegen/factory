@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/owainlewis/factory/internal/protocol"
@@ -117,7 +118,7 @@ func (manager *Manager) reconcileManifest(ctx context.Context, manifest attemptM
 		return errors.Join(unsafeReconciliation(err), retryReconciliation(persistErr))
 	}
 
-	inspection, inspectErr := inspectManifestWorktree(ctx, manager.options.GitExecutable, manager.dataDirectory, manifest)
+	inspections, inspectErr := inspectManifestWorktrees(ctx, manager.options.GitExecutable, manager.dataDirectory, manifest)
 	if inspectErr != nil {
 		if !isWorktreeMismatch(inspectErr) {
 			return retryReconciliation(inspectErr)
@@ -129,21 +130,35 @@ func (manager *Manager) reconcileManifest(ctx context.Context, manifest attemptM
 		})
 		return errors.Join(unsafeReconciliation(inspectErr), retryReconciliation(persistErr))
 	}
+	anyPresent := false
+	allConsistent := true
+	for _, inspection := range inspections {
+		if inspection.PathExists || inspection.Registered {
+			anyPresent = true
+		}
+		if inspection.PathExists != inspection.Registered {
+			allConsistent = false
+		}
+	}
 
 	switch {
-	case manifest.Lifecycle == manifestCleanupStarted && !inspection.PathExists && !inspection.Registered:
-		cleanupResult := "worktree was already absent during startup cleanup recovery"
+	case manifest.Lifecycle == manifestCleanupStarted && !anyPresent:
+		cleanupResult := "worktrees were already absent during startup cleanup recovery"
 		if manifest.CleanupIntent == cleanupIntentAutomatic {
-			deleted, deleteErr := deleteSafeManagedBranch(
-				ctx, manager.options.GitExecutable, inspection.Repository.Path, manifest,
-			)
-			if deleteErr != nil {
-				return retryReconciliation(deleteErr)
+			deleted := false
+			for _, entry := range manifest.manifestWorktrees() {
+				removed, deleteErr := deleteSafeManagedBranch(
+					ctx, manager.options.GitExecutable, entry.RepositoryPath, entry,
+				)
+				if deleteErr != nil {
+					return retryReconciliation(deleteErr)
+				}
+				deleted = deleted || removed
 			}
 			if deleted {
-				cleanupResult += "; safe local branch deleted"
+				cleanupResult += "; some safe local branches deleted"
 			} else {
-				cleanupResult += "; local branch preserved"
+				cleanupResult += "; local branches preserved"
 			}
 		}
 		_, err = manager.manifests.update(manifest.AttemptID, func(value *attemptManifest) error {
@@ -156,30 +171,9 @@ func (manager *Manager) reconcileManifest(ctx context.Context, manifest attemptM
 			err = manager.recordDisposed(manifest.AttemptID)
 		}
 		return retryReconciliation(err)
-	case manifest.Lifecycle == manifestCleanupStarted && inspection.PathExists && inspection.Registered:
-		force := false
-		switch manifest.CleanupIntent {
-		case cleanupIntentAutomatic:
-			if eligibilityErr := automaticCleanupEligible(
-				ctx, manager.options.GitExecutable, manifest, inspection,
-			); eligibilityErr != nil {
-				reason := "interrupted automatic cleanup retained after revalidation: " + eligibilityErr.Error()
-				updated, updateErr := manager.manifests.update(manifest.AttemptID, func(value *attemptManifest) error {
-					value.Lifecycle = manifestRetained
-					value.RetentionReason = boundedText(reason, 1000)
-					value.CleanupResult = "automatic cleanup stopped without removing the worktree"
-					return nil
-				})
-				if updateErr != nil {
-					return retryReconciliation(updateErr)
-				}
-				manager.recordRetained(updated)
-				return nil
-			}
-		case cleanupIntentOperator:
-			force = true
-		default:
-			reason := "cleanup intent was not durable; worktree retained for operator inspection"
+	case manifest.Lifecycle == manifestCleanupStarted && anyPresent && allConsistent:
+		if manifest.CleanupIntent != cleanupIntentAutomatic && manifest.CleanupIntent != cleanupIntentOperator {
+			reason := "cleanup intent was not durable; worktrees retained for operator inspection"
 			updated, updateErr := manager.manifests.update(manifest.AttemptID, func(value *attemptManifest) error {
 				value.Lifecycle = manifestRetained
 				value.RetentionReason = reason
@@ -192,19 +186,51 @@ func (manager *Manager) reconcileManifest(ctx context.Context, manifest attemptM
 			manager.recordRetained(updated)
 			return nil
 		}
-		if err := removeInspectedWorktree(ctx, manager.options.GitExecutable, inspection, force); err != nil {
-			return retryReconciliation(err)
-		}
-		cleanupResult := "startup finished interrupted cleanup; local branch preserved"
-		if manifest.CleanupIntent == cleanupIntentAutomatic {
-			deleted, deleteErr := deleteSafeManagedBranch(
-				ctx, manager.options.GitExecutable, inspection.Repository.Path, manifest,
-			)
-			if deleteErr != nil {
-				return retryReconciliation(deleteErr)
+		force := manifest.CleanupIntent == cleanupIntentOperator
+		entries := manifest.manifestWorktrees()
+		retainedPaths := make([]string, 0)
+		for index, inspection := range inspections {
+			if !inspection.PathExists || !inspection.Registered {
+				return retryReconciliation(fmt.Errorf("worktree %s identity is incomplete", entries[index].WorktreePath))
 			}
-			if deleted {
-				cleanupResult = "startup finished interrupted cleanup; safe local branch deleted"
+			if !force {
+				if eligibilityErr := automaticCleanupEligible(
+					ctx, manager.options.GitExecutable, entries[index], inspection,
+				); eligibilityErr != nil {
+					retainedPaths = append(retainedPaths, entries[index].WorktreePath)
+					continue
+				}
+			}
+			if err := removeInspectedWorktree(ctx, manager.options.GitExecutable, inspection, force); err != nil {
+				return retryReconciliation(err)
+			}
+		}
+		if len(retainedPaths) != 0 {
+			reason := "interrupted automatic cleanup retained after revalidation: " + strings.Join(retainedPaths, ", ")
+			updated, updateErr := manager.manifests.update(manifest.AttemptID, func(value *attemptManifest) error {
+				value.Lifecycle = manifestRetained
+				value.RetentionReason = boundedText(reason, 1000)
+				value.CleanupResult = "automatic cleanup stopped without removing some worktrees"
+				return nil
+			})
+			if updateErr != nil {
+				return retryReconciliation(updateErr)
+			}
+			manager.recordRetained(updated)
+			return nil
+		}
+		cleanupResult := "startup finished interrupted cleanup; local branches preserved"
+		if manifest.CleanupIntent == cleanupIntentAutomatic {
+			for _, entry := range manifest.manifestWorktrees() {
+				deleted, deleteErr := deleteSafeManagedBranch(
+					ctx, manager.options.GitExecutable, entry.RepositoryPath, entry,
+				)
+				if deleteErr != nil {
+					return retryReconciliation(deleteErr)
+				}
+				if deleted {
+					cleanupResult = "startup finished interrupted cleanup; some safe local branches deleted"
+				}
 			}
 		}
 		_, err = manager.manifests.update(manifest.AttemptID, func(value *attemptManifest) error {
@@ -217,8 +243,8 @@ func (manager *Manager) reconcileManifest(ctx context.Context, manifest attemptM
 			err = manager.recordDisposed(manifest.AttemptID)
 		}
 		return retryReconciliation(err)
-	case inspection.PathExists != inspection.Registered:
-		reason := "worktree exists in only one of the filesystem and Git worktree registry"
+	case !allConsistent:
+		reason := "a worktree exists in only one of the filesystem and Git worktree registry"
 		_, err = manager.manifests.update(manifest.AttemptID, func(value *attemptManifest) error {
 			value.Lifecycle = manifestInconsistent
 			value.RetentionReason = reason
@@ -228,12 +254,12 @@ func (manager *Manager) reconcileManifest(ctx context.Context, manifest attemptM
 			return retryReconciliation(err)
 		}
 		return unsafeReconciliation(errors.New(reason))
-	case !inspection.PathExists && !inspection.Registered:
+	case !anyPresent:
 		lifecycle := manifestMissing
-		reason := "previously created worktree is absent"
+		reason := "previously created worktrees are absent"
 		if manifest.Lifecycle == manifestPreparing || manifest.Lifecycle == manifestNotCreated {
 			lifecycle = manifestNotCreated
-			reason = "worktree was never created"
+			reason = "worktrees were never created"
 		} else if manifest.Lifecycle == manifestCleaned {
 			lifecycle = manifestCleaned
 			reason = ""
@@ -249,7 +275,7 @@ func (manager *Manager) reconcileManifest(ctx context.Context, manifest attemptM
 		return retryReconciliation(err)
 	default:
 		if manifest.Lifecycle == manifestCleaned || manifest.Lifecycle == manifestNotCreated {
-			reason := "worktree exists for a manifest recorded as absent"
+			reason := "worktrees exist for a manifest recorded as absent"
 			_, err = manager.manifests.update(manifest.AttemptID, func(value *attemptManifest) error {
 				value.Lifecycle = manifestInconsistent
 				value.RetentionReason = reason
@@ -260,7 +286,7 @@ func (manager *Manager) reconcileManifest(ctx context.Context, manifest attemptM
 			}
 			return unsafeReconciliation(errors.New(reason))
 		}
-		reason := firstNonEmpty(manifest.RetentionReason, "worktree retained after worker restart")
+		reason := firstNonEmpty(manifest.RetentionReason, "worktrees retained after worker restart")
 		updated, err := manager.manifests.update(manifest.AttemptID, func(value *attemptManifest) error {
 			value.Lifecycle = manifestRetained
 			value.RetentionReason = reason
@@ -312,26 +338,67 @@ func inspectManifestWorktree(
 	dataDirectory string,
 	manifest attemptManifest,
 ) (worktreeInspection, error) {
-	expectedPath := filepath.Join(dataDirectory, "worktrees", manifest.AttemptID)
-	if manifest.WorktreePath != expectedPath {
+	inspections, err := inspectManifestWorktrees(ctx, gitExecutable, dataDirectory, manifest)
+	if err != nil {
+		return worktreeInspection{}, err
+	}
+	return inspections[0], nil
+}
+
+func inspectManifestWorktrees(
+	ctx context.Context,
+	gitExecutable string,
+	dataDirectory string,
+	manifest attemptManifest,
+) ([]worktreeInspection, error) {
+	expectedRoot := filepath.Join(dataDirectory, "worktrees", manifest.AttemptID)
+	expectedPrimary := expectedRoot
+	if len(manifest.AdditionalWorktrees) > 0 {
+		expectedPrimary = filepath.Join(expectedRoot, "0")
+	}
+	entries := manifest.manifestWorktrees()
+	inspections := make([]worktreeInspection, 0, len(entries))
+	var inspectionErrors []error
+	for index, entry := range entries {
+		expectedPath := expectedPrimary
+		if index > 0 {
+			expectedPath = filepath.Join(expectedRoot, strconv.Itoa(index))
+		}
+		inspection, err := inspectManifestWorktreeEntry(ctx, gitExecutable, dataDirectory, entry, expectedPath)
+		inspections = append(inspections, inspection)
+		if err != nil {
+			inspectionErrors = append(inspectionErrors, err)
+		}
+	}
+	return inspections, errors.Join(inspectionErrors...)
+}
+
+func inspectManifestWorktreeEntry(
+	ctx context.Context,
+	gitExecutable string,
+	dataDirectory string,
+	entry manifestWorktree,
+	expectedPath string,
+) (worktreeInspection, error) {
+	if entry.WorktreePath != expectedPath {
 		return worktreeInspection{}, worktreeMismatch("manifest worktree path escapes the Factory worktree root")
 	}
-	repository, err := resolveRepository(manifest.RepositoryKey, manifest.RepositoryPath, gitExecutable)
+	repository, err := resolveRepository(entry.RepositoryKey, entry.RepositoryPath, gitExecutable)
 	if err != nil {
 		return worktreeInspection{}, fmt.Errorf("verify manifest repository: %w", err)
 	}
-	if repository.Path != manifest.RepositoryPath || !sameRemoteIdentity(repository.RemoteIdentity, manifest.RemoteIdentity) {
+	if repository.Path != entry.RepositoryPath || !sameRemoteIdentity(repository.RemoteIdentity, entry.RemoteIdentity) {
 		return worktreeInspection{}, worktreeMismatch("manifest repository identity no longer matches")
 	}
 	inspection := worktreeInspection{Repository: repository}
-	info, err := os.Lstat(manifest.WorktreePath)
+	info, err := os.Lstat(entry.WorktreePath)
 	switch {
 	case err == nil:
 		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 			return inspection, worktreeMismatch("manifest worktree path is not a real directory")
 		}
-		canonical, canonicalErr := filepath.EvalSymlinks(manifest.WorktreePath)
-		if canonicalErr != nil || canonical != manifest.WorktreePath {
+		canonical, canonicalErr := filepath.EvalSymlinks(entry.WorktreePath)
+		if canonicalErr != nil || canonical != entry.WorktreePath {
 			return inspection, worktreeMismatch("manifest worktree path is not canonical")
 		}
 		inspection.PathExists = true
@@ -344,23 +411,23 @@ func inspectManifestWorktree(
 	if err != nil {
 		return inspection, err
 	}
-	for _, entry := range entries {
-		entryPath, pathErr := filepath.Abs(entry.Path)
+	for _, worktree := range entries {
+		entryPath, pathErr := filepath.Abs(worktree.Path)
 		if pathErr != nil {
 			continue
 		}
 		entryPath = filepath.Clean(entryPath)
-		if entryPath != manifest.WorktreePath {
+		if entryPath != entry.WorktreePath {
 			continue
 		}
 		if inspection.Registered {
 			return inspection, worktreeMismatch("Git lists the manifest worktree more than once")
 		}
 		inspection.Registered = true
-		inspection.Entry = entry
+		inspection.Entry = worktree
 	}
 	if inspection.Registered {
-		if inspection.Entry.Branch != manifest.Branch {
+		if inspection.Entry.Branch != entry.Branch {
 			return inspection, worktreeMismatch("Git worktree branch does not match the manifest")
 		}
 		if !commitPattern.MatchString(inspection.Entry.Head) {
@@ -368,7 +435,7 @@ func inspectManifestWorktree(
 		}
 	}
 	if inspection.PathExists && inspection.Registered {
-		stdout, stderr, statusErr := runGitCommand(ctx, gitExecutable, manifest.WorktreePath, 1<<20,
+		stdout, stderr, statusErr := runGitCommand(ctx, gitExecutable, entry.WorktreePath, 1<<20,
 			"--no-optional-locks", "status", "--porcelain=v1")
 		if statusErr != nil {
 			return inspection, commandFailure("inspect retained worktree status", stdout, stderr, statusErr)
@@ -415,7 +482,7 @@ func removeInspectedWorktree(
 func automaticCleanupEligible(
 	ctx context.Context,
 	gitExecutable string,
-	manifest attemptManifest,
+	entry manifestWorktree,
 	inspection worktreeInspection,
 ) error {
 	if !inspection.PathExists || !inspection.Registered {
@@ -424,10 +491,10 @@ func automaticCleanupEligible(
 	if inspection.Status != "" {
 		return errors.New("worktree is dirty")
 	}
-	if inspection.Entry.Head == manifest.BaseCommit {
+	if inspection.Entry.Head == entry.BaseCommit {
 		return nil
 	}
-	stdout, stderr, err := runGitCommand(ctx, gitExecutable, manifest.WorktreePath, 256<<10,
+	stdout, stderr, err := runGitCommand(ctx, gitExecutable, entry.WorktreePath, 256<<10,
 		"for-each-ref", "--format=%(refname)", "--contains", inspection.Entry.Head, "refs/remotes")
 	if err != nil {
 		return commandFailure("inspect published refs", stdout, stderr, err)
@@ -442,9 +509,9 @@ func deleteSafeManagedBranch(
 	ctx context.Context,
 	gitExecutable string,
 	repositoryPath string,
-	manifest attemptManifest,
+	entry manifestWorktree,
 ) (bool, error) {
-	ref := "refs/heads/" + manifest.Branch
+	ref := "refs/heads/" + entry.Branch
 	stdout, stderr, err := runGitCommand(ctx, gitExecutable, repositoryPath, 64<<10,
 		"for-each-ref", "--format=%(objectname)", ref)
 	if err != nil {
@@ -457,7 +524,7 @@ func deleteSafeManagedBranch(
 	if !commitPattern.MatchString(head) {
 		return false, errors.New("managed local branch does not point to a full commit ID")
 	}
-	if head != manifest.BaseCommit {
+	if head != entry.BaseCommit {
 		stdout, stderr, err = runGitCommand(ctx, gitExecutable, repositoryPath, 256<<10,
 			"for-each-ref", "--format=%(refname)", "--contains", head, "refs/remotes")
 		if err != nil {
@@ -472,7 +539,7 @@ func deleteSafeManagedBranch(
 		return false, fmt.Errorf("inspect branch worktree ownership before cleanup: %w", err)
 	}
 	for _, worktree := range worktrees {
-		if worktree.Branch == manifest.Branch {
+		if worktree.Branch == entry.Branch {
 			return false, nil
 		}
 	}
@@ -492,19 +559,26 @@ func deleteSafeManagedBranch(
 	return true, nil
 }
 
-func (manager *Manager) cleanCompletedWorktree(attemptID string) error {
+func (manager *Manager) cleanCompletedWorktrees(attemptID string) error {
 	manifest, err := manager.manifests.load(attemptID)
 	if err != nil {
 		return err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*gitCommandTimeout)
 	defer cancel()
-	inspection, err := inspectManifestWorktree(ctx, manager.options.GitExecutable, manager.dataDirectory, manifest)
-	if err != nil {
-		return err
+	entries := manifest.manifestWorktrees()
+	inspections, inspectErr := inspectManifestWorktrees(ctx, manager.options.GitExecutable, manager.dataDirectory, manifest)
+	if inspectErr != nil {
+		return inspectErr
 	}
-	if err := automaticCleanupEligible(ctx, manager.options.GitExecutable, manifest, inspection); err != nil {
-		return err
+	retainedPaths := make([]string, 0)
+	for index, inspection := range inspections {
+		if !inspection.PathExists || !inspection.Registered {
+			return fmt.Errorf("worktree %s identity is incomplete", entries[index].WorktreePath)
+		}
+		if err := automaticCleanupEligible(ctx, manager.options.GitExecutable, entries[index], inspection); err != nil {
+			retainedPaths = append(retainedPaths, entries[index].WorktreePath)
+		}
 	}
 	if err := manager.persistLifecycle(attemptID, manifestCleanupStarted, func(value *attemptManifest) {
 		value.CleanupIntent = cleanupIntentAutomatic
@@ -516,27 +590,47 @@ func (manager *Manager) cleanCompletedWorktree(attemptID string) error {
 	if err != nil {
 		return err
 	}
-	inspection, err = inspectManifestWorktree(ctx, manager.options.GitExecutable, manager.dataDirectory, manifest)
-	if err != nil {
-		return err
+	entries = manifest.manifestWorktrees()
+	inspections, inspectErr = inspectManifestWorktrees(ctx, manager.options.GitExecutable, manager.dataDirectory, manifest)
+	if inspectErr != nil {
+		return inspectErr
 	}
-	if err := automaticCleanupEligible(ctx, manager.options.GitExecutable, manifest, inspection); err != nil {
-		return err
+	retainedSet := make(map[string]bool, len(retainedPaths))
+	for _, path := range retainedPaths {
+		retainedSet[path] = true
 	}
-	if err := removeInspectedWorktree(ctx, manager.options.GitExecutable, inspection, false); err != nil {
-		return err
+	for index, inspection := range inspections {
+		entry := entries[index]
+		if retainedSet[entry.WorktreePath] {
+			continue
+		}
+		if !inspection.PathExists || !inspection.Registered {
+			return fmt.Errorf("worktree %s identity is incomplete", entry.WorktreePath)
+		}
+		if err := automaticCleanupEligible(ctx, manager.options.GitExecutable, entry, inspection); err != nil {
+			return err
+		}
+		if err := removeInspectedWorktree(ctx, manager.options.GitExecutable, inspection, false); err != nil {
+			return err
+		}
+		_, _ = deleteSafeManagedBranch(ctx, manager.options.GitExecutable, inspection.Repository.Path, entry)
 	}
-	deleted, err := deleteSafeManagedBranch(
-		ctx, manager.options.GitExecutable, inspection.Repository.Path, manifest,
-	)
-	if err != nil {
-		return err
+	if len(retainedPaths) != 0 {
+		reason := "cleanup retained worktrees with unpublished or uncommitted changes: " + strings.Join(retainedPaths, ", ")
+		updated, updateErr := manager.manifests.update(attemptID, func(value *attemptManifest) error {
+			value.Lifecycle = manifestRetained
+			value.RetentionReason = boundedText(reason, 1000)
+			value.CleanupResult = "automatic cleanup retained ineligible worktrees"
+			return nil
+		})
+		if updateErr != nil {
+			return updateErr
+		}
+		manager.recordRetained(updated)
+		return errors.New("some worktrees were retained for inspection")
 	}
 	return manager.persistLifecycle(attemptID, manifestCleaned, func(value *attemptManifest) {
-		value.CleanupResult = "automatic cleanup completed; local branch preserved"
-		if deleted {
-			value.CleanupResult = "automatic cleanup completed; safe local branch deleted"
-		}
+		value.CleanupResult = "automatic cleanup completed; local branches preserved"
 		value.RetentionReason = ""
 	})
 }
@@ -546,14 +640,24 @@ func (manager *Manager) recordRetained(manifest attemptManifest) {
 	if manager.config.path != "" {
 		cleanupCommand += " --config " + shellQuote(manager.config.path)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*gitCommandTimeout)
+	inspections, _ := inspectManifestWorktrees(ctx, manager.options.GitExecutable, manager.dataDirectory, manifest)
+	cancel()
+	entries := manifest.manifestWorktrees()
 	manager.stateMutex.Lock()
-	if _, exists := manager.retained[manifest.AttemptID]; !exists {
-		manager.retainedCounts[manifest.RemoteIdentity]++
-	}
-	manager.retained[manifest.AttemptID] = protocol.RetainedWorktree{
-		AttemptID: manifest.AttemptID, RepositoryID: manifest.RepositoryID,
-		Path: manifest.WorktreePath, Reason: boundedText(manifest.RetentionReason, 1000),
-		CleanupCommand: cleanupCommand,
+	for index, inspection := range inspections {
+		if !inspection.PathExists || !inspection.Registered {
+			continue
+		}
+		entry := entries[index]
+		if _, exists := manager.retained[entry.WorktreePath]; !exists {
+			manager.retainedCounts[entry.RemoteIdentity]++
+		}
+		manager.retained[entry.WorktreePath] = protocol.RetainedWorktree{
+			AttemptID: manifest.AttemptID, RepositoryID: entry.RepositoryID,
+			Path: entry.WorktreePath, Reason: boundedText(manifest.RetentionReason, 1000),
+			CleanupCommand: cleanupCommand,
+		}
 	}
 	manager.stateMutex.Unlock()
 }

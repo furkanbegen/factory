@@ -31,7 +31,7 @@ func TestBuildPromptIncludesGrammaticalSafetyInstruction(t *testing.T) {
 		"Target base branch: main\n\n" +
 		"Keep the change focused."
 
-	if got := buildPrompt(claim, value); got != want {
+	if got := buildPrompt(claim, preparedAttempt{repositories: []Repository{{}}, worktrees: []worktree{value}}); got != want {
 		t.Fatalf("buildPrompt() = %q, want %q", got, want)
 	}
 }

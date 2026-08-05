@@ -308,7 +308,13 @@ func TestStartupReconciliationClassifiesManifestAndFilesystemState(t *testing.T)
 			if persisted.Lifecycle != test.want {
 				t.Fatalf("lifecycle = %q; want %q", persisted.Lifecycle, test.want)
 			}
-			_, retained := manager.retained[claim.Attempt.ID]
+			retained := false
+			for _, retainedWorktree := range manager.retained {
+				if retainedWorktree.AttemptID == claim.Attempt.ID {
+					retained = true
+					break
+				}
+			}
 			if retained != (test.want == manifestRetained) {
 				t.Fatalf("retained=%v for lifecycle %s", retained, persisted.Lifecycle)
 			}
@@ -370,10 +376,6 @@ func TestSafeManagedBranchDeletionRequiresBaseOrPublishedHead(t *testing.T) {
 					runGitTest(t, repository.path, "fetch", "origin")
 				}
 			}
-			manifest := attemptManifest{
-				TaskID: taskID, AttemptID: attemptID, BaseCommit: value.BaseCommit,
-				Branch: value.Branch,
-			}
 			inspection := worktreeInspection{
 				Repository: resolved, PathExists: true, Registered: true,
 				Entry: gitWorktreeEntry{Path: value.Path, Branch: value.Branch},
@@ -382,7 +384,8 @@ func TestSafeManagedBranchDeletionRequiresBaseOrPublishedHead(t *testing.T) {
 				t.Fatal(err)
 			}
 			deleted, err := deleteSafeManagedBranch(
-				context.Background(), "git", resolved.Path, manifest,
+				context.Background(), "git", resolved.Path,
+				manifestWorktree{BaseCommit: value.BaseCommit, Branch: value.Branch},
 			)
 			if err != nil {
 				t.Fatal(err)
@@ -427,9 +430,7 @@ func TestSafeManagedBranchDeletionPreservesBranchCheckedOutElsewhere(t *testing.
 		context.Background(),
 		"git",
 		resolved.Path,
-		attemptManifest{
-			TaskID: taskID, AttemptID: attemptID, BaseCommit: value.BaseCommit, Branch: value.Branch,
-		},
+		manifestWorktree{BaseCommit: value.BaseCommit, Branch: value.Branch},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -1321,9 +1322,12 @@ func TestPeriodicRegistrationCannotOvertakeRetainedCapacityHandoff(t *testing.T)
 	}
 	finishDone := make(chan struct{})
 	go func() {
-		manager.finishWithWorktree(*claim, strings.Repeat("h", 43), &attemptHandle{
+		manager.finishPrepared(*claim, strings.Repeat("h", 43), &attemptHandle{
 			expiry: claim.Attempt.LeaseExpiresAt,
-		}, manager.repositories[0], value, "failed", "", "retained")
+		}, preparedAttempt{
+			repositories: []Repository{manager.repositories[0]},
+			worktrees:    []worktree{value},
+		}, "failed", "", "retained")
 		close(finishDone)
 	}()
 	select {

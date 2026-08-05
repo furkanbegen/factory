@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -212,6 +213,34 @@ func FormatAgentPrompt(title, repository, worktreePath, workingBranch, targetBas
 		"Working branch: " + workingBranch + "\n" +
 		"Target base branch: " + targetBaseBranch + "\n\n" +
 		resolvedPrompt
+}
+
+type WorkspaceRepository struct {
+	Repository       string `json:"repository"`
+	WorktreePath     string `json:"worktree_path"`
+	WorkingBranch    string `json:"working_branch"`
+	TargetBaseBranch string `json:"target_base_branch"`
+}
+
+func FormatAgentPromptWithWorkspace(title string, repositories []WorkspaceRepository, resolvedPrompt string) string {
+	text := "You are running in a Factory managed Git workspace with one worktree per repository.\n" +
+		"Work only on the assigned task and the repositories it needs. Preserve unrelated changes and do not touch Factory state or unrelated worktrees. " +
+		"Do not switch, create, rename, or delete branches or worktrees. Complete and verify the task before returning a concise result. " +
+		"Reference created or edited files by their absolute paths below the workspace in the final result.\n\n" +
+		"Task title: " + title + "\n\n" +
+		"Workspace repositories:\n"
+	for index, repository := range repositories {
+		primary := ""
+		if index == 0 {
+			primary = " (primary)"
+		}
+		text += fmt.Sprintf("%d. Repository: %s%s\n   Worktree: %s\n   Working branch: %s\n   Target base branch: %s\n",
+			index+1, repository.Repository, primary, repository.WorktreePath,
+			repository.WorkingBranch, repository.TargetBaseBranch)
+	}
+	text += "\nDecide which repositories this request needs; edit only those and leave the others untouched.\n\n" +
+		resolvedPrompt
+	return text
 }
 
 func AgentPromptFits(title, repository, resolvedPrompt string) bool {
