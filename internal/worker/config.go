@@ -110,7 +110,7 @@ func validateConfig(config Config) error {
 		return errors.New("name is required and must be at most 200 bytes")
 	}
 	if config.Runtime != "" && !protocol.SupportedRuntime(config.Runtime) {
-		return errors.New("runtime must be codex or claude-code")
+		return errors.New("runtime must be codex, claude-code, or opencode")
 	}
 	if config.MaxConcurrent < 1 || config.MaxConcurrent > maxConcurrent {
 		return fmt.Errorf("max_concurrent must be between 1 and %d", maxConcurrent)

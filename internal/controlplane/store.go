@@ -874,7 +874,7 @@ func (s *Store) RegisterWorker(ctx context.Context, workerID string, input proto
 		input.Runtime = protocol.RuntimeCodex
 	}
 	if !protocol.SupportedRuntime(input.Runtime) {
-		return protocol.Worker{}, invalid("invalid_runtime", "runtime must be codex or claude-code")
+		return protocol.Worker{}, invalid("invalid_runtime", "runtime must be codex, claude-code, or opencode")
 	}
 	if len(input.RuntimeVersion) > 1024 {
 		return protocol.Worker{}, invalid("invalid_runtime_version", "runtime_version must be at most 1024 bytes")

@@ -1029,8 +1029,8 @@ all Automation evaluators are unhealthy.
   when another operator edits the workflow before submission completes.
 - Editing or disabling a workflow after task creation does not change that
   task's claim payload.
-- A Codex worker and a Claude Code worker both run workflow tasks without
-  workflow-specific worker code.
+- A Codex worker and a Claude Code worker and an OpenCode worker all run
+  workflow tasks without workflow-specific worker code.
 - Existing clients that create tasks with `description` and no
   `workflow_revision_id` behave as
   before, and already registered worker binaries receive the resolved prompt
@@ -1145,7 +1145,7 @@ composition, all three Automation prompt templates, canonical predicate and
 schedule JSON, empty condition arrays, JSON escaping, proof that schedule and
 Run now contain no provider revalidation instruction, UTF-8 byte limits,
 original context storage, immutable retry behavior, and claims consumed by
-pre-Workflow Codex and Claude Code workers.
+pre-Workflow Codex, Claude Code, and OpenCode workers.
 
 Fake-`gh` tests will cover issue states and labels, pull-request states, drafts,
 labels and base branches, strict JSON, duplicate conflicts, the 101st match,

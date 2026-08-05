@@ -160,9 +160,12 @@ func (options Options) withDefaults(runtime string) Options {
 		options.GitHubExecutable = "gh"
 	}
 	if options.RuntimeExecutable == "" {
-		if runtime == protocol.RuntimeClaudeCode {
+		switch runtime {
+		case protocol.RuntimeClaudeCode:
 			options.RuntimeExecutable = "claude"
-		} else {
+		case protocol.RuntimeOpenCode:
+			options.RuntimeExecutable = "opencode"
+		default:
 			options.RuntimeExecutable = "codex"
 		}
 	}

@@ -204,6 +204,7 @@ func superviseRuntime(
 ) error {
 	var arguments []string
 	var claudeResult *claudeResultCapture
+	var opencodeResult *opencodeResultCapture
 	switch init.Runtime {
 	case protocol.RuntimeCodex:
 		arguments = []string{"exec", "--json", "--color", "never", "--output-last-message", init.ResultPath, "-"}
@@ -215,6 +216,9 @@ func superviseRuntime(
 			"--permission-mode", "bypassPermissions",
 		}
 		claudeResult = &claudeResultCapture{}
+	case protocol.RuntimeOpenCode:
+		arguments = []string{"run", "--format", "json", "--auto", init.Prompt}
+		opencodeResult = &opencodeResultCapture{}
 	default:
 		return finishSupervisorStartFailure(anchor, anchorIdentity, writer, errors.New("unsupported worker runtime"))
 	}
@@ -222,9 +226,16 @@ func superviseRuntime(
 	command := exec.Command(init.RuntimeExecutable, arguments...)
 	command.Dir = init.Worktree
 	configureExistingProcessGroup(command, groupID)
-	stdin, err := command.StdinPipe()
-	if err != nil {
-		return finishSupervisorStartFailure(anchor, anchorIdentity, writer, fmt.Errorf("open %s stdin: %w", displayName, err))
+	// Codex and Claude Code read the prompt from stdin. OpenCode takes the
+	// prompt as its positional run message, so no stdin pipe is created for it.
+	promptViaStdin := init.Runtime != protocol.RuntimeOpenCode
+	var stdin io.WriteCloser
+	if promptViaStdin {
+		pipe, err := command.StdinPipe()
+		if err != nil {
+			return finishSupervisorStartFailure(anchor, anchorIdentity, writer, fmt.Errorf("open %s stdin: %w", displayName, err))
+		}
+		stdin = pipe
 	}
 	stdout, stdoutWriter, err := os.Pipe()
 	if err != nil {
@@ -250,15 +261,19 @@ func superviseRuntime(
 	defer stdout.Close()
 	defer stderr.Close()
 	promptErrors := make(chan error, 1)
-	go func() {
-		_, writeErr := io.WriteString(stdin, init.Prompt)
-		closeErr := stdin.Close()
-		promptErrors <- errors.Join(writeErr, closeErr)
-	}()
+	if promptViaStdin {
+		go func() {
+			_, writeErr := io.WriteString(stdin, init.Prompt)
+			closeErr := stdin.Close()
+			promptErrors <- errors.Join(writeErr, closeErr)
+		}()
+	}
 	stderrTail := &tailBuffer{limit: protocol.MaxErrorBytes}
 	var captureLine func([]byte, bool)
 	if claudeResult != nil {
 		captureLine = claudeResult.capture
+	} else if opencodeResult != nil {
+		captureLine = opencodeResult.capture
 	}
 	readers := sync.WaitGroup{}
 	readers.Add(2)
@@ -354,7 +369,13 @@ func superviseRuntime(
 
 	var result string
 	var truncated bool
-	if claudeResult != nil {
+	if opencodeResult != nil {
+		result = opencodeResult.result
+		truncated = opencodeResult.truncated
+		if !opencodeResult.found && reason == "exited" && waitErr == nil {
+			waitErr = errors.New("OpenCode returned no result")
+		}
+	} else if claudeResult != nil {
 		result = claudeResult.result
 		truncated = claudeResult.truncated
 		if !claudeResult.found && reason == "exited" && waitErr == nil {
@@ -494,6 +515,53 @@ func streamSupervisorOutput(
 		if err != nil {
 			return
 		}
+	}
+}
+
+type opencodeResultCapture struct {
+	line      []byte
+	oversized bool
+	result    string
+	found     bool
+	truncated bool
+}
+
+func (capture *opencodeResultCapture) capture(fragment []byte, end bool) {
+	if len(fragment) > 0 {
+		if capture.oversized {
+			return
+		}
+		if remaining := maxSupervisorLineBytes - len(capture.line); len(fragment) > remaining {
+			capture.line = append(capture.line, fragment[:remaining]...)
+			capture.oversized = true
+		} else {
+			capture.line = append(capture.line, fragment...)
+		}
+	}
+	if !end {
+		return
+	}
+	defer func() {
+		capture.line = capture.line[:0]
+		capture.oversized = false
+	}()
+	if capture.oversized {
+		return
+	}
+	var event struct {
+		Type string `json:"type"`
+		Part struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"part"`
+	}
+	if json.Unmarshal(capture.line, &event) != nil || event.Type != "text" || event.Part.Type != "text" {
+		return
+	}
+	capture.result = boundedText(event.Part.Text, protocol.MaxResultBytes)
+	capture.found = true
+	if len(event.Part.Text) > protocol.MaxResultBytes {
+		capture.truncated = true
 	}
 }
 

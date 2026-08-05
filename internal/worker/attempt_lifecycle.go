@@ -633,6 +633,7 @@ func buildPrompt(claim protocol.Claim, value worktree) string {
 	return protocol.FormatAgentPrompt(
 		claim.Task.Title,
 		claim.Repository.RemoteIdentity,
+		value.Path,
 		value.Branch,
 		value.BaseBranch,
 		claim.Task.Description,

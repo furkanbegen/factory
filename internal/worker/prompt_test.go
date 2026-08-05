@@ -21,9 +21,9 @@ func TestWorkerUsesSharedPromptFormatAndRejectsOversizedLegacyClaim(t *testing.T
 		},
 		Repository: protocol.Repository{ID: "repository-a", RemoteIdentity: "github.com/example/repository"},
 	}
-	value := worktree{Branch: "factory/123456789abc-abcdef123456", BaseBranch: "main"}
+	value := worktree{Path: "/home/test/worker/worktrees/33333333-3333-4333-8333-333333333333", Branch: "factory/123456789abc-abcdef123456", BaseBranch: "main"}
 	if got, want := buildPrompt(claim, value), protocol.FormatAgentPrompt(
-		claim.Task.Title, claim.Repository.RemoteIdentity, value.Branch, value.BaseBranch, claim.Task.Description,
+		claim.Task.Title, claim.Repository.RemoteIdentity, value.Path, value.Branch, value.BaseBranch, claim.Task.Description,
 	); got != want {
 		t.Fatalf("worker prompt differs from shared formatter:\n%s\nwant:\n%s", got, want)
 	}

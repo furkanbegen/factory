@@ -8,7 +8,7 @@ This guide starts one control plane and one worker on macOS or Linux.
 - Git
 - `curl`
 - `just`
-- an authenticated Codex CLI or Claude Code CLI
+- an authenticated Codex CLI, Claude Code CLI, or OpenCode CLI
 - an authenticated `gh` CLI for centrally managed GitHub repositories
 
 Node.js is not required for normal startup.
@@ -70,6 +70,15 @@ For Claude Code, use another config and identity:
 server = "http://127.0.0.1:7337"
 name = "local-claude"
 runtime = "claude-code"
+max_concurrent = 1
+```
+
+For OpenCode, use another config and identity:
+
+```toml
+server = "http://127.0.0.1:7337"
+name = "local-opencode"
+runtime = "opencode"
 max_concurrent = 1
 ```
 
@@ -256,7 +265,7 @@ The operator build embeds the committed `web/dist` and never invokes npm.
 Worker never becomes healthy
 
 - confirm the selected runtime command is on `PATH`;
-- authenticate Codex or Claude Code as the same OS user;
+- authenticate Codex, Claude Code, or OpenCode as the same OS user;
 - confirm every repository path and its `origin`;
 - ensure each worker has a unique data directory;
 - inspect the worker JSON logs.

@@ -28,9 +28,9 @@ starts with one repository and one trigger.
 
 The Go control plane accepts `{title, description, worker_id, repository_id}`
 from the UI or API. The proposed workflow extension adds an optional immutable
-`workflow_revision_id`. Go workers claim resolved task prompts and run Codex or
-Claude Code. They do not know whether a task came from a human, GitHub, or a
-future scheduler.
+`workflow_revision_id`. Go workers claim resolved task prompts and run Codex,
+Claude Code, or OpenCode. They do not know whether a task came from a human,
+GitHub, or a future scheduler.
 
 This rejected design placed source polling outside the control plane and
 workers. Current Factory instead runs typed GitHub Automation evaluation and
@@ -50,7 +50,7 @@ flowchart LR
     F["Pinned workflow revision"] --> CP
     I -->|"POST /api/v1/tasks"| CP["Factory control plane"]
     CP -->|"HTTP claim polling"| W["Configured worker"]
-    W -->|"Codex or Claude Code"| A["Coding agent"]
+    W -->|"Codex, Claude Code, or OpenCode"| A["Coding agent"]
     A -->|"gh and git"| GH
 ```
 

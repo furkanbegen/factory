@@ -223,8 +223,8 @@ packages can remain testable build targets. Releases should publish only
 ## Acceptance
 
 - one Go build produces the documented operator binary;
-- `factory start` runs the UI plus Codex and Claude workers from separate
-  configs;
+- `factory start` runs the UI plus Codex, Claude, and OpenCode workers from
+  separate configs;
 - current state and worker identities open without migration;
 - startup detects unhealthy or stale workers and stops all children on failure;
 - manual tasks work from text, a file, and stdin;

@@ -1,7 +1,8 @@
 # Copy this file to ~/.factory/worker.toml.
 server = "http://127.0.0.1:7337"
 name = "local"
-# One worker identity runs exactly one runtime: "codex" or "claude-code".
+# One worker identity runs exactly one runtime: "codex", "claude-code", or
+# "opencode".
 runtime = "codex"
 max_concurrent = 1
 # With no data_directory, this worker stores durable state in

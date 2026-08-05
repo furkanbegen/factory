@@ -1,5 +1,5 @@
 export type TaskState = "queued" | "running" | "succeeded" | "failed" | "cancelled";
-export type Runtime = "codex" | "claude-code";
+export type Runtime = "codex" | "claude-code" | "opencode";
 
 export interface Repository {
   id: string;

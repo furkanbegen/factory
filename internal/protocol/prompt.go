@@ -134,12 +134,14 @@ func resolveGitHubAutomationPrompt(instructions, context string, conditions, obs
 		"\n\nUntrusted trigger observation:\n\n" + string(observation)
 }
 
-func FormatAgentPrompt(title, repository, workingBranch, targetBaseBranch, resolvedPrompt string) string {
+func FormatAgentPrompt(title, repository, worktreePath, workingBranch, targetBaseBranch, resolvedPrompt string) string {
 	return "You are running in a Factory managed Git worktree.\n" +
 		"Work only on the assigned task and repository. Preserve unrelated changes and do not touch Factory state or unrelated worktrees. " +
-		"Do not switch, create, rename, or delete branches or worktrees. Complete and verify the task before returning a concise result.\n\n" +
+		"Do not switch, create, rename, or delete branches or worktrees. Complete and verify the task before returning a concise result. " +
+		"Reference created or edited files by their absolute path below the worktree in the final result.\n\n" +
 		"Task title: " + title + "\n" +
 		"Repository: " + repository + "\n" +
+		"Worktree: " + worktreePath + "\n" +
 		"Working branch: " + workingBranch + "\n" +
 		"Target base branch: " + targetBaseBranch + "\n\n" +
 		resolvedPrompt
@@ -147,5 +149,6 @@ func FormatAgentPrompt(title, repository, workingBranch, targetBaseBranch, resol
 
 func AgentPromptFits(title, repository, resolvedPrompt string) bool {
 	maxBranch := strings.Repeat("x", MaxAgentBranchBytes)
-	return len([]byte(FormatAgentPrompt(title, repository, maxBranch, maxBranch, resolvedPrompt))) <= MaxAgentPromptBytes
+	maxWorktree := strings.Repeat("x", MaxAgentBranchBytes)
+	return len([]byte(FormatAgentPrompt(title, repository, maxWorktree, maxBranch, maxBranch, resolvedPrompt))) <= MaxAgentPromptBytes
 }

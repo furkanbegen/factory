@@ -16,8 +16,8 @@ It separates durable coordination from agent execution:
 - `factory-worker` has one stable identity and one agent runtime. It advertises
   runtime capacity and provider access, acquires centrally managed repositories
   on demand, and runs attempts in isolated Git worktrees.
-- Codex or Claude Code performs the repository work as a child process of the
-  worker.
+- Codex, Claude Code, or OpenCode performs the repository work as a child
+  process of the worker.
 
 The current task contract is a title, either a legacy free-text description or
 a pinned Workflow revision plus free-text context, assigned worker, repository,
@@ -45,7 +45,9 @@ factory-worker (one identity and one runtime)
    |-- bounded on-demand repository cache
    |-- optional legacy static checkouts
    |-- attempt manifests and owned Git worktrees
-   `-- Codex CLI or Claude Code CLI
+   |-- Codex CLI
+   |-- Claude Code CLI
+   `-- OpenCode CLI
 
 ```
 
@@ -54,8 +56,8 @@ the system does not use WebSockets.
 
 ## 3. Architectural invariants
 
-1. One worker identity has one immutable runtime, either `codex` or
-   `claude-code`.
+1. One worker identity has one immutable runtime, `codex`, `claude-code`, or
+   `opencode`.
 2. Every task freezes one worker and one control-plane repository. Routed work
    may select a cattle worker before that repository exists in its local cache.
 3. Only a healthy, recently registered worker with free capacity can claim its
@@ -167,9 +169,11 @@ The worker launches the configured runtime non-interactively:
 - Codex uses `codex exec` with JSON events and a file for the last message.
 - Claude Code uses `claude --print` with streaming JSON and bypassed permission
   prompts.
+- OpenCode uses `opencode run` with streaming JSON events, auto-approved
+  permissions, and the prompt passed as its run message.
 
-Both runtimes receive the same generated prompt and produce the same bounded
-event and completion contract.
+All three runtimes receive the same generated prompt and produce the same
+bounded event and completion contract.
 
 ### Browser UI
 

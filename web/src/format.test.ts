@@ -1,10 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { eventSummary } from "./format";
+import { eventSummary, runtimeLabel } from "./format";
 import type { AttemptEvent } from "./types";
 
 function event(payload: unknown, kind = "codex"): AttemptEvent {
   return { sequence: 0, kind, payload, server_time: "2026-07-31T12:00:00Z" };
 }
+
+describe("runtimeLabel", () => {
+  it("labels every supported runtime", () => {
+    expect(runtimeLabel("codex")).toBe("Codex");
+    expect(runtimeLabel("claude-code")).toBe("Claude Code");
+    expect(runtimeLabel("opencode")).toBe("OpenCode");
+  });
+});
 
 describe("eventSummary", () => {
   it("renders Codex assistant messages without their event envelope", () => {
@@ -122,5 +130,73 @@ describe("eventSummary", () => {
       label: "Progress",
       text: "Task completed",
     });
+  });
+});
+
+describe("OpenCode event summaries", () => {
+  const openCodeEvent = (payload: unknown) => event(payload, "opencode");
+
+  it("renders assistant text events", () => {
+    expect(eventSummary(openCodeEvent({
+      type: "text",
+      part: { type: "text", text: "The tests pass." },
+    }))).toEqual({ label: "Assistant", text: "The tests pass." });
+  });
+
+  it("renders successful bash commands", () => {
+    expect(eventSummary(openCodeEvent({
+      type: "tool_use",
+      part: {
+        type: "tool",
+        tool: "bash",
+        state: { status: "completed", input: { command: "go test ./..." }, metadata: { exit: 0 } },
+      },
+    }))).toEqual({ label: "Command", text: "Succeeded: go test ./..." });
+  });
+
+  it("reports failed bash commands without exposing captured output", () => {
+    const summary = eventSummary(openCodeEvent({
+      type: "tool_use",
+      part: {
+        type: "tool",
+        tool: "bash",
+        state: {
+          status: "completed",
+          input: { command: "gh pr list" },
+          output: "private and large output",
+          metadata: { exit: 1 },
+        },
+      },
+    }));
+    expect(summary).toEqual({ label: "Command error", text: "Failed (1): gh pr list" });
+    expect(summary?.text).not.toContain("private");
+  });
+
+  it("renders file edits by path", () => {
+    expect(eventSummary(openCodeEvent({
+      type: "tool_use",
+      part: {
+        type: "tool",
+        tool: "write",
+        state: { status: "completed", input: { filePath: "OPEN_PRS.md" } },
+      },
+    }))).toEqual({ label: "Files", text: "File changes completed: OPEN_PRS.md" });
+  });
+
+  it("hides routine step lifecycle events", () => {
+    expect(eventSummary(openCodeEvent({ type: "step_start", part: { type: "step-start" } }))).toBeNull();
+    expect(eventSummary(openCodeEvent({
+      type: "step_finish", part: { type: "step-finish", reason: "tool-calls" },
+    }))).toBeNull();
+    expect(eventSummary(openCodeEvent({
+      type: "step_finish", part: { type: "step-finish", reason: "stop" },
+    }))).toBeNull();
+  });
+
+  it("reports failed steps as errors", () => {
+    expect(eventSummary(openCodeEvent({
+      type: "step_finish",
+      part: { type: "step-finish", reason: "error", error: { message: "provider unavailable" } },
+    }))).toEqual({ label: "Error", text: "provider unavailable" });
   });
 });

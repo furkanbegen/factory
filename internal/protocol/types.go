@@ -10,6 +10,7 @@ import (
 const (
 	RuntimeCodex              = "codex"
 	RuntimeClaudeCode         = "claude-code"
+	RuntimeOpenCode           = "opencode"
 	MaxBodyBytes              = 1 << 20
 	MaxDescriptionBytes       = 64 << 10
 	MaxEventBatchBytes        = 256 << 10
@@ -43,7 +44,7 @@ const (
 )
 
 func SupportedRuntime(value string) bool {
-	return value == RuntimeCodex || value == RuntimeClaudeCode
+	return value == RuntimeCodex || value == RuntimeClaudeCode || value == RuntimeOpenCode
 }
 
 type RepositoryRegistration struct {

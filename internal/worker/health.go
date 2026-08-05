@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -12,6 +14,11 @@ import (
 )
 
 const healthCheckTimeout = 10 * time.Second
+
+var (
+	openCodeAnsiEscape       = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+	openCodeCredentialsCount = regexp.MustCompile(`([0-9]+)\s+credentials`)
+)
 
 type health struct {
 	State          string
@@ -60,6 +67,8 @@ func checkHealth(
 	var authArguments []string
 	if runtime == protocol.RuntimeClaudeCode {
 		authArguments = []string{"auth", "status", "--json"}
+	} else if runtime == protocol.RuntimeOpenCode {
+		authArguments = []string{"auth", "list"}
 	} else {
 		authArguments = []string{"login", "status"}
 	}
@@ -75,6 +84,11 @@ func checkHealth(
 		}
 		if json.Unmarshal(stdout, &status) != nil || !status.LoggedIn {
 			result.Error = errors.New("Claude Code authentication check reports that the worker is not logged in")
+			return result
+		}
+	} else if runtime == protocol.RuntimeOpenCode {
+		if !openCodeHasCredentials(string(stdout)) {
+			result.Error = errors.New("OpenCode authentication check reports no configured provider credentials")
 			return result
 		}
 	} else if strings.TrimSpace(string(stdout))+strings.TrimSpace(string(stderr)) == "" {
@@ -97,8 +111,22 @@ func checkHealth(
 }
 
 func runtimeDisplayName(runtime string) string {
-	if runtime == protocol.RuntimeClaudeCode {
+	switch runtime {
+	case protocol.RuntimeClaudeCode:
 		return "Claude Code"
+	case protocol.RuntimeOpenCode:
+		return "OpenCode"
+	default:
+		return "Codex"
 	}
-	return "Codex"
+}
+
+func openCodeHasCredentials(output string) bool {
+	cleaned := openCodeAnsiEscape.ReplaceAllString(output, "")
+	match := openCodeCredentialsCount.FindStringSubmatch(cleaned)
+	if match == nil {
+		return false
+	}
+	count, err := strconv.Atoi(match[1])
+	return err == nil && count > 0
 }

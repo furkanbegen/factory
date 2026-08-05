@@ -14,8 +14,9 @@ runtime = "codex"
 max_concurrent = 1
 ```
 
-`runtime` is `codex` or `claude-code`. A worker never switches runtime per task.
-Run two workers when you want to send the same task to both agents.
+`runtime` is `codex`, `claude-code`, or `opencode`. A worker never switches
+runtime per task. Run two workers when you want to send the same task to
+different agents.
 
 When `data_directory` is omitted, Factory derives an absolute path beside the
 configuration as `workers/<config filename without .toml>`. For example,
@@ -112,8 +113,9 @@ network, and credential access. A later sandbox can contain this same prepared
 workspace without changing the task contract.
 
 Codex is launched non-interactively with structured result output. Claude Code
-is launched non-interactively with JSON output. The worker normalizes both into
-the same control-plane result contract.
+is launched non-interactively with JSON output. OpenCode is launched
+non-interactively with streaming JSON output and auto-approved permissions. The
+worker normalizes all three into the same control-plane result contract.
 
 Runtime output and API event payloads are bounded. Oversized output is truncated
 or summarized so one agent cannot grow a request without limit.

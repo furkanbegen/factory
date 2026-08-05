@@ -144,6 +144,37 @@ echo '{"type":"assistant","message":{"content":[{"type":"text","text":"working"}
 echo '{"type":"result","subtype":"success","result":"completed by fake Claude Code"}'
 `
 
+const fakeOpenCodeScript = `#!/bin/sh
+set -eu
+if [ "${1:-}" = "--version" ]; then
+  echo "1.18.13"
+  exit 0
+fi
+if [ "${1:-}" = "auth" ] && [ "${2:-}" = "list" ]; then
+  printf '\342\224\224  1 credentials\n'
+  exit 0
+fi
+if [ "${1:-}" != "run" ] || [ "${2:-}" != "--format" ] ||
+   [ "${3:-}" != "json" ] || [ "${4:-}" != "--auto" ]; then
+  echo "unexpected fake OpenCode arguments" >&2
+  exit 90
+fi
+prompt="$5"
+if [ "$prompt" != "complete this task" ]; then
+  echo "unexpected fake OpenCode prompt" >&2
+  exit 91
+fi
+printf '{"type":"step_start"}\n'
+if [ "${FACTORY_TEST_OPENCODE_OVERSIZED_RESULT:-}" = "1" ]; then
+  printf '{"type":"text","part":{"type":"text","text":"'
+  head -c 263144 /dev/zero | tr '\000' x
+  printf '"}}\n'
+else
+  printf '{"type":"text","part":{"type":"text","text":"completed by fake OpenCode"}}\n'
+fi
+printf '{"type":"step_finish"}\n'
+`
+
 func TestWorkerSupervisorHelperProcess(t *testing.T) {
 	if os.Getenv("FACTORY_TEST_SUPERVISOR") != "1" {
 		return
@@ -446,6 +477,13 @@ func writeFakeCodex(t *testing.T, path string) {
 func writeFakeClaude(t *testing.T, path string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(fakeClaudeScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeFakeOpenCode(t *testing.T, path string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(fakeOpenCodeScript), 0o700); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -833,6 +871,134 @@ func TestClaudeCodeSupervisorAcceptsOversizedResult(t *testing.T) {
 		case <-timeout.C:
 			t.Fatal("Claude Code oversized result supervisor did not exit")
 		}
+	}
+}
+
+func TestOpenCodeHealthAndSupervisorContract(t *testing.T) {
+	opencodePath := filepath.Join(t.TempDir(), "opencode")
+	writeFakeOpenCode(t, opencodePath)
+	value := checkHealth(
+		context.Background(), "git", protocol.RuntimeOpenCode, opencodePath, "gh", nil,
+	)
+	if value.State != "healthy" || value.RuntimeVersion != "1.18.13" {
+		t.Fatalf("OpenCode health = %#v", value)
+	}
+
+	t.Setenv("FACTORY_TEST_SUPERVISOR", "1")
+	repository := createRepository(t, "opencode-supervisor")
+	process, err := startSupervisor(
+		[]string{os.Args[0], "-test.run=TestWorkerSupervisorHelperProcess", "--"},
+		supervisorInit{
+			Runtime:           protocol.RuntimeOpenCode,
+			RuntimeExecutable: opencodePath,
+			Worktree:          repository.path,
+			ResultPath:        filepath.Join(t.TempDir(), "unused-result"),
+			Prompt:            "complete this task",
+			TimeoutSeconds:    60,
+		},
+		io.Discard,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := process.awaitReady(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := process.send("start"); err != nil {
+		t.Fatal(err)
+	}
+	timeout := time.NewTimer(10 * time.Second)
+	defer timeout.Stop()
+	sawResultEvent := false
+	for {
+		select {
+		case message := <-process.messages:
+			if message.Type == "output" && strings.Contains(message.Text, `"type":"text"`) {
+				sawResultEvent = true
+			}
+			if message.Type != "exit" {
+				continue
+			}
+			if message.ExitCode != 0 || message.Reason != "exited" ||
+				message.Result != "completed by fake OpenCode" || !sawResultEvent {
+				t.Fatalf("OpenCode supervisor exit = %#v", message)
+			}
+			return
+		case err := <-process.decodeErrors:
+			t.Fatalf("decode OpenCode supervisor output: %v", err)
+		case <-timeout.C:
+			t.Fatal("OpenCode supervisor did not exit")
+		}
+	}
+}
+
+func TestOpenCodeSupervisorAcceptsOversizedResult(t *testing.T) {
+	t.Setenv("FACTORY_TEST_SUPERVISOR", "1")
+	t.Setenv("FACTORY_TEST_OPENCODE_OVERSIZED_RESULT", "1")
+	opencodePath := filepath.Join(t.TempDir(), "opencode")
+	writeFakeOpenCode(t, opencodePath)
+	repository := createRepository(t, "opencode-oversized-result")
+	process, err := startSupervisor(
+		[]string{os.Args[0], "-test.run=TestWorkerSupervisorHelperProcess", "--"},
+		supervisorInit{
+			Runtime:           protocol.RuntimeOpenCode,
+			RuntimeExecutable: opencodePath,
+			Worktree:          repository.path,
+			ResultPath:        filepath.Join(t.TempDir(), "unused-result"),
+			Prompt:            "complete this task",
+			TimeoutSeconds:    60,
+		},
+		io.Discard,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := process.awaitReady(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := process.send("start"); err != nil {
+		t.Fatal(err)
+	}
+	timeout := time.NewTimer(10 * time.Second)
+	defer timeout.Stop()
+	for {
+		select {
+		case message := <-process.messages:
+			if message.Type != "exit" {
+				continue
+			}
+			if message.ExitCode != 0 || message.Reason != "exited" || !message.Truncated ||
+				len(message.Result) != protocol.MaxResultBytes {
+				t.Fatalf("OpenCode oversized result exit = %#v", message)
+			}
+			if strings.Trim(message.Result, "x") != "" {
+				t.Fatal("OpenCode oversized result did not preserve its bounded prefix")
+			}
+			return
+		case err := <-process.decodeErrors:
+			t.Fatalf("decode OpenCode supervisor output: %v", err)
+		case <-timeout.C:
+			t.Fatal("OpenCode oversized result supervisor did not exit")
+		}
+	}
+}
+
+func TestOpenCodeHealthRequiresConfiguredCredentials(t *testing.T) {
+	opencodePath := filepath.Join(t.TempDir(), "opencode")
+	body := "#!/bin/sh\n" +
+		"if [ \"${1:-}\" = \"--version\" ]; then\n  echo \"1.18.13\"\n  exit 0\nfi\n" +
+		"if [ \"${1:-}\" = \"auth\" ] && [ \"${2:-}\" = \"list\" ]; then\n" +
+		"  printf '\\342\\224\\224  0 credentials\\n'\n  exit 0\nfi\n" +
+		"exit 90\n"
+	if err := os.WriteFile(opencodePath, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	value := checkHealth(
+		context.Background(), "git", protocol.RuntimeOpenCode, opencodePath, "gh", nil,
+	)
+	if value.State != "unhealthy" || value.Error == nil ||
+		!strings.Contains(value.Error.Error(), "no configured provider credentials") {
+		t.Fatalf("OpenCode zero-credential health = %#v", value)
 	}
 }
 

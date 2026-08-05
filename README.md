@@ -2,7 +2,8 @@
 
 Factory is infrastructure for running coding agents across Git repositories.
 Its Go control plane stores work, shows the worker fleet, and delegates tasks.
-Each Go worker owns one agent runtime, currently Codex or Claude Code.
+Each Go worker owns one agent runtime, currently Codex, Claude Code, or
+OpenCode.
 
 The browser UI provides:
 
@@ -23,7 +24,7 @@ Requirements:
 - Git
 - `curl`
 - `just`
-- Codex CLI or Claude Code CLI, authenticated on the worker host
+- Codex CLI, Claude Code CLI, or OpenCode CLI, authenticated on the worker host
 
 Node.js is only needed when changing the UI. Normal builds use the committed,
 embedded UI assets.
@@ -44,9 +45,10 @@ mkdir -p ~/.factory
 cp examples/worker.toml ~/.factory/worker.toml
 ```
 
-Edit `~/.factory/worker.toml` to select `codex` or `claude-code`. Workers need
-no repository list. They probe local `gh` access and acquire centrally managed
-GitHub repositories on demand. Then start the server and worker:
+Edit `~/.factory/worker.toml` to select `codex`, `claude-code`, or `opencode`.
+Workers need no repository list. They probe local `gh` access and acquire
+centrally managed GitHub repositories on demand. Then start the server and
+worker:
 
 ```sh
 just run
@@ -60,7 +62,7 @@ Finalize each verify and lock the same legacy snapshot. Import creates disabled
 typed Automations and Finalize archives copies without deleting the originals.
 
 One worker has one stable identity and one runtime. Run another worker with a
-different config and data directory when you want both Codex and Claude Code:
+different config and data directory when you want multiple agents:
 
 ```sh
 FACTORY_WORKER_CONFIG=~/.factory/claude-worker.toml \
@@ -86,7 +88,8 @@ Go workers
   one identity + one runtime + on-demand repository cache
    |
    +-- Codex CLI
-   `-- Claude Code CLI
+   +-- Claude Code CLI
+   `-- OpenCode CLI
 ```
 
 The control plane owns durable coordination. Workers own execution and Git
@@ -113,7 +116,7 @@ Implemented:
 
 - Go control-plane API and embedded React UI;
 - durable tasks, executions, attempts, leases, events, and cancellation;
-- Codex and Claude Code workers;
+- Codex, Claude Code, and OpenCode workers;
 - reusable versioned Workflows;
 - disabled-first typed GitHub issue, GitHub pull-request, and schedule
   Automations evaluated by the control plane;

@@ -13,7 +13,9 @@ export function stateLabel(state: string): string {
 }
 
 export function runtimeLabel(runtime: string): string {
-  return runtime === "claude-code" ? "Claude Code" : "Codex";
+  if (runtime === "claude-code") return "Claude Code";
+  if (runtime === "opencode") return "OpenCode";
+  return "Codex";
 }
 
 export function timeAgo(value: string, now = Date.now()): string {
@@ -50,6 +52,8 @@ const hiddenEventTypes = new Set([
   "turn.completed",
 ]);
 
+const openCodeFileTools = new Set(["write", "edit", "patch", "create", "delete", "unlink", "rename"]);
+
 export function eventSummary(event: AttemptEvent): EventSummary | null {
   if (typeof event.payload === "string") {
     return { label: stateLabel(event.kind), text: event.payload };
@@ -58,6 +62,7 @@ export function eventSummary(event: AttemptEvent): EventSummary | null {
   if (!payload) return fallbackSummary(event);
 
   const type = stringValue(payload.type);
+  if (event.kind === "opencode") return openCodeEventSummary(event, payload);
   if (type === "assistant") return claudeAssistantSummary(payload);
   if (type === "user") return claudeToolResultSummary(payload);
   if (type === "result") {
@@ -154,6 +159,92 @@ function codexItemSummary(payload: Record<string, unknown>, completed: boolean):
   return null;
 }
 
+function openCodeEventSummary(event: AttemptEvent, payload: Record<string, unknown>): EventSummary | null {
+  const type = stringValue(payload.type);
+  if (type === "text") return openCodeTextSummary(payload);
+  if (type === "tool_use") return openCodeToolSummary(payload);
+  if (type === "step_start" || type === "step_finish") return openCodeStepSummary(payload);
+  if (type === "error") {
+    return { label: "Error", text: openCodeErrorText(payload) ?? "OpenCode reported an error." };
+  }
+  if (type === "reasoning" || type === "snapshot") return null;
+  const stream = stringValue(payload.stream);
+  const streamText = stringValue(payload.text);
+  if (stream && streamText) {
+    return {
+      label: stream === "stderr" ? "Error output" : "Output",
+      text: compactOutput(streamText, Boolean(payload.truncated)),
+    };
+  }
+  const directText = firstString(payload, ["text", "message", "title", "summary"]);
+  if (directText) return { label: eventLabel(event.kind), text: directText };
+  return fallbackSummary(event);
+}
+
+function openCodeTextSummary(payload: Record<string, unknown>): EventSummary | null {
+  const part = record(payload.part);
+  const text = (part ? stringValue(part.text) : null) ?? stringValue(payload.text);
+  return text ? { label: "Assistant", text } : null;
+}
+
+function openCodeStepSummary(payload: Record<string, unknown>): EventSummary | null {
+  if (stringValue(payload.type) === "step_start") return null;
+  const part = record(payload.part);
+  const reason = part ? stringValue(part.reason) : null;
+  if (reason === "error") {
+    return { label: "Error", text: openCodePartErrorText(part, payload) ?? "OpenCode step failed" };
+  }
+  return null;
+}
+
+function openCodeToolSummary(payload: Record<string, unknown>): EventSummary | null {
+  const part = record(payload.part);
+  if (!part) return null;
+  const tool = stringValue(part.tool) ?? "tool";
+  const state = record(part.state);
+  const status = state ? stringValue(state.status) : null;
+  const failed = status === "error" || status === "cancelled";
+  const running = !status || status === "pending" || status === "running";
+  const input = state ? record(state.input) : null;
+  const path = input ? firstString(input, ["filePath", "file_path", "path"]) : null;
+  const title = state ? stringValue(state.title) : null;
+  if (tool === "bash") {
+    const command = compactLine(input ? stringValue(input.command) ?? "Command" : "Command");
+    if (running) return { label: "Command", text: `Running ${command}` };
+    const metadata = state ? record(state.metadata) : null;
+    const exitCode = metadata ? numberValue(metadata.exit) : null;
+    if (exitCode === 0) return { label: "Command", text: `Succeeded: ${command}` };
+    if (exitCode !== null) return { label: "Command error", text: `Failed (${exitCode}): ${command}` };
+    if (failed) return { label: "Command error", text: `Failed: ${command}` };
+    return { label: "Command", text: `Finished: ${command}` };
+  }
+  const subject = compactLine(path ?? title ?? humanize(tool));
+  if (openCodeFileTools.has(tool)) {
+    if (running) return { label: "Files", text: `Changing ${subject}` };
+    return {
+      label: failed ? "File error" : "Files",
+      text: failed ? `File changes failed: ${subject}` : `File changes completed: ${subject}`,
+    };
+  }
+  if (running) return { label: "Tool", text: `Using ${tool}: ${subject}` };
+  return {
+    label: failed ? "Tool error" : "Tool",
+    text: `${tool}: ${subject} ${failed ? "failed" : "completed"}`,
+  };
+}
+
+function openCodePartErrorText(part: Record<string, unknown> | null, payload: Record<string, unknown>): string | null {
+  if (part) {
+    const direct = errorText(part);
+    if (direct) return direct;
+  }
+  return errorText(payload);
+}
+
+function openCodeErrorText(payload: Record<string, unknown>): string | null {
+  return openCodePartErrorText(record(payload.part), payload);
+}
+
 function toolAction(value: Record<string, unknown>, completed: boolean, failed = false): string {
   const name = firstString(value, ["tool", "name"]) ?? "Tool call";
   const input = record(value.input);
@@ -168,7 +259,7 @@ function fallbackSummary(event: AttemptEvent): EventSummary {
 }
 
 function eventLabel(kind: string): string {
-  if (kind === "claude-code" || kind === "codex") return "Runtime";
+  if (kind === "claude-code" || kind === "codex" || kind === "opencode") return "Runtime";
   return stateLabel(kind);
 }
 
