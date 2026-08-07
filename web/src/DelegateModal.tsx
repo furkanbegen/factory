@@ -210,7 +210,7 @@ export function DelegateModal({
                 <option value="">{workersPending ? "Loading workers…" : "Any eligible worker"}</option>
                 {workers.map((worker) => (
                   <option key={worker.id} value={worker.id}>
-                    {worker.name} · {runtimeLabel(worker.runtime)}{worker.model ? ` · ${worker.model}` : ""} · {worker.online ? "online" : "offline"}
+                    {worker.name} · {runtimeLabel(worker.runtime)}{worker.agent ? ` · agent ${worker.agent}` : ""}{worker.model ? ` · ${worker.model}` : ""} · {worker.online ? "online" : "offline"}
                   </option>
                 ))}
               </select>

@@ -866,7 +866,7 @@ function AutomationForm({
                 <option value="">Any eligible worker</option>
                 {(workers.data ?? []).map((worker) => (
                   <option key={worker.id} value={worker.id}>
-                    {worker.name} · {worker.runtime}{worker.model ? ` · ${worker.model}` : ""} · {worker.online ? "online" : "offline"}{worker.accepting_work ? "" : " · paused"}
+                    {worker.name} · {worker.runtime}{worker.agent ? ` · agent ${worker.agent}` : ""}{worker.model ? ` · ${worker.model}` : ""} · {worker.online ? "online" : "offline"}{worker.accepting_work ? "" : " · paused"}
                   </option>
                 ))}
               </select>
@@ -1008,7 +1008,7 @@ function pinnedWorkerLabel(automation: Automation, workers?: Worker[]): string {
   if (!automation.worker_id) return "Any eligible worker (routed by load)";
   const worker = workers?.find((candidate) => candidate.id === automation.worker_id);
   if (!worker) return `Worker ${automation.worker_id} (offline)`;
-  return `${worker.name} · ${worker.runtime}${worker.model ? ` · ${worker.model}` : ""} · ${worker.online ? "online" : "offline"}`;
+  return `${worker.name} · ${worker.runtime}${worker.agent ? ` · agent ${worker.agent}` : ""}${worker.model ? ` · ${worker.model}` : ""} · ${worker.online ? "online" : "offline"}`;
 }
 
 function triggerSummary(automation: Automation): string {
