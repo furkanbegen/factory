@@ -189,7 +189,7 @@ func (s *Store) ImportLegacyPoller(
 
 		automationValue, automationTitleKey, normalizeErr := normalizeAutomation(
 			"legacy-poller:"+input.MigrationID+":automation:"+queueID,
-			mapping.AutomationTitle, workflowID, queuePreview.RepositoryID, "",
+			mapping.AutomationTitle, workflowID, queuePreview.RepositoryID, "", "",
 			queue.TimeoutSeconds,
 			protocol.AutomationTrigger{
 				Type: protocol.AutomationTriggerGitHubIssue, State: queue.Status,

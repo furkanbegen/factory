@@ -31,6 +31,8 @@ export function DelegateModal({
   const titleID = useId();
   const descriptionID = useId();
   const workflowID = useId();
+  const agentID = useId();
+  const modelID = useId();
   const titleRef = useRef<HTMLInputElement>(null);
   const modalRef = useRef<HTMLDivElement>(null);
   const requestRef = useRef<{ fingerprint: string; key: string } | undefined>(undefined);
@@ -39,19 +41,28 @@ export function DelegateModal({
   const [additionalRepositoryIDs, setAdditionalRepositoryIDs] = useState<string[]>([]);
   const [timeout, setTimeout] = useState("7200");
   const [workflowRevisionID, setWorkflowRevisionID] = useState("");
+  const [agent, setAgent] = useState("");
+  const [model, setModel] = useState("");
   const [errors, setErrors] = useState<Record<string, string>>({});
   const selectedWorker = workers.find((worker) => worker.id === workerID);
-  const repositories = selectedWorker?.repositories ?? [];
-  const workflows = useQuery({
-    queryKey: ["workflows", "enabled"],
-    queryFn: api.allEnabledWorkflows,
-  });
+  const routeMode = workerID === "";
   const managedRepositories = useQuery({
     queryKey: ["repositories"],
     queryFn: api.repositories,
   });
+  const enabledManagedRepositories = (managedRepositories.data ?? []).filter((repo) => repo.enabled);
+  const repositoryOptions = routeMode
+    ? enabledManagedRepositories
+    : (selectedWorker?.repositories ?? []);
+  const repositoryIdentity = repositoryOptions.find((repo) => repo.id === repositoryID)?.remote_identity ?? "";
+  const workerAgents = [...new Set(workers.map((worker) => worker.agent).filter((value): value is string => Boolean(value)))];
+  const workerModels = [...new Set(workers.map((worker) => worker.model).filter((value): value is string => Boolean(value)))];
   const additionalRepositories = (managedRepositories.data ?? [])
     .filter((repo) => repo.enabled && repo.id !== repositoryID);
+  const workflows = useQuery({
+    queryKey: ["workflows", "enabled"],
+    queryFn: api.allEnabledWorkflows,
+  });
 
   useEffect(() => {
     titleRef.current?.focus();
@@ -96,8 +107,9 @@ export function DelegateModal({
     if (!title) nextErrors.title = "Enter a task title.";
     else if (Array.from(title).length > 200) nextErrors.title = "Keep the title to 200 characters.";
     if (!context.trim()) nextErrors.description = "Enter task context.";
-    if (!workerID) nextErrors.worker = "Choose a worker.";
     if (!repositoryID) nextErrors.repository = "Choose a repository.";
+    if (agent.trim() && new TextEncoder().encode(agent.trim()).length > 200) nextErrors.agent = "Keep the agent name to 200 bytes.";
+    if (model.trim() && new TextEncoder().encode(model.trim()).length > 200) nextErrors.model = "Keep the model name to 200 bytes.";
     if (additionalRepositoryIDs.includes(repositoryID)) nextErrors.additional = "The primary repository is already in the set.";
     const timeoutSeconds = Number(timeout);
     if (!Number.isInteger(timeoutSeconds) || timeoutSeconds < 1 || timeoutSeconds > 28_800) {
@@ -105,16 +117,25 @@ export function DelegateModal({
     }
     setErrors(nextErrors);
     if (Object.keys(nextErrors).length) return;
-    const payload = {
+    const base = {
       title,
-      worker_id: workerID,
-      repository_id: repositoryID,
       repository_set_ids: additionalRepositoryIDs,
       timeout_seconds: timeoutSeconds,
       ...(workflowRevisionID
         ? { context, workflow_revision_id: workflowRevisionID }
         : { description: context }),
     };
+    const payload = routeMode
+      ? {
+          ...base,
+          route: {
+            repository_remote_identity: repositoryIdentity,
+            source_access: { provider: "github", hostname: "github.com" } as const,
+            ...(agent.trim() ? { agent: agent.trim() } : {}),
+            ...(model.trim() ? { model: model.trim() } : {}),
+          },
+        }
+      : { ...base, worker_id: workerID, repository_id: repositoryID };
     const fingerprint = JSON.stringify(payload);
     if (requestRef.current?.fingerprint !== fingerprint) {
       requestRef.current = { fingerprint, key: crypto.randomUUID() };
@@ -175,7 +196,7 @@ export function DelegateModal({
             >
               <textarea id={descriptionID} name="description" rows={6} aria-invalid={Boolean(errors.description)} placeholder="Describe the outcome, constraints, and checks…" />
             </Field>
-            <Field label="Worker" htmlFor="delegate-worker" error={errors.worker}>
+            <Field label="Worker" htmlFor="delegate-worker" error={errors.worker} hint={routeMode ? "Any eligible worker, optionally filtered by agent or model below." : undefined}>
               <select
                 id="delegate-worker"
                 value={workerID}
@@ -186,7 +207,7 @@ export function DelegateModal({
                 }}
                 disabled={workersPending || workers.length === 0}
               >
-                <option value="">{workersPending ? "Loading workers…" : workers.length ? "Choose a worker" : "No workers registered"}</option>
+                <option value="">{workersPending ? "Loading workers…" : "Any eligible worker"}</option>
                 {workers.map((worker) => (
                   <option key={worker.id} value={worker.id}>
                     {worker.name} · {runtimeLabel(worker.runtime)}{worker.model ? ` · ${worker.model}` : ""} · {worker.online ? "online" : "offline"}
@@ -200,10 +221,32 @@ export function DelegateModal({
             {selectedWorker?.health === "unhealthy" && (
               <div className="warning-banner compact"><AlertCircle size={16} /> This worker is unhealthy and will not claim work until it recovers.</div>
             )}
+            {routeMode && (
+              <>
+                <Field label="Agent" htmlFor={agentID} error={errors.agent} hint="Optional · any worker advertising this agent value">
+                  <input id={agentID} list="delegate-agents" value={agent} onChange={(event) => setAgent(event.target.value)} aria-invalid={Boolean(errors.agent)} placeholder="build, review, …" />
+                  <datalist id="delegate-agents">
+                    {workerAgents.map((value) => <option key={value} value={value} />)}
+                  </datalist>
+                </Field>
+                <Field label="Model" htmlFor={modelID} error={errors.model} hint="Optional · any worker advertising this model value">
+                  <input id={modelID} list="delegate-models" value={model} onChange={(event) => setModel(event.target.value)} aria-invalid={Boolean(errors.model)} placeholder="openai/gpt-5, …" />
+                  <datalist id="delegate-models">
+                    {workerModels.map((value) => <option key={value} value={value} />)}
+                  </datalist>
+                </Field>
+              </>
+            )}
             <Field label="Repository" htmlFor="delegate-repository" error={errors.repository}>
-              <select id="delegate-repository" value={repositoryID} onChange={(event) => setRepositoryID(event.target.value)} disabled={!workerID}>
-                <option value="">{workerID ? (repositories.length ? "Choose a repository" : "No repositories advertised") : "Choose a worker first"}</option>
-                {repositories.map((repo) => <option key={repo.id} value={repo.id}>{repo.key} · {repo.remote_identity}</option>)}
+              <select id="delegate-repository" value={repositoryID} onChange={(event) => setRepositoryID(event.target.value)} disabled={repositoryOptions.length === 0}>
+                <option value="">{repositoryOptions.length
+                  ? "Choose a repository"
+                  : routeMode
+                    ? (managedRepositories.isPending ? "Loading managed repositories…" : "No enabled managed repositories")
+                    : "No repositories advertised"}</option>
+                {repositoryOptions.map((repo) => (
+                  <option key={repo.id} value={repo.id}>{routeMode ? repo.remote_identity : "key" in repo ? `${repo.key} · ${repo.remote_identity}` : repo.remote_identity}</option>
+                ))}
               </select>
             </Field>
             <Field label="Additional repositories" htmlFor="delegate-additional" error={errors.additional} hint="Optional · chosen from the enabled managed catalog. The worker clones each on demand and the agent gets one worktree per repository.">
@@ -212,7 +255,7 @@ export function DelegateModal({
                 values={additionalRepositories.map((repo) => ({ id: repo.id, label: repo.remote_identity }))}
                 selected={additionalRepositoryIDs}
                 onChange={setAdditionalRepositoryIDs}
-                placeholder={managedRepositories.isPending ? "Loading managed repositories…" : workerID ? "None selected" : "Choose a worker first"}
+                placeholder={managedRepositories.isPending ? "Loading managed repositories…" : routeMode ? "None selected" : "Choose a worker first"}
                 emptyLabel={managedRepositories.error ? "Failed to load the managed catalog." : repositoryID ? "No other enabled managed repositories." : "Choose a primary repository first."}
                 disabled={managedRepositories.isPending || additionalRepositories.length === 0}
               />

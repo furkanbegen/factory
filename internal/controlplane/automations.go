@@ -22,6 +22,7 @@ type normalizedAutomation struct {
 	Title          string                     `json:"name"`
 	WorkflowID     string                     `json:"workflow_id"`
 	RepositoryID   string                     `json:"repository_id,omitempty"`
+	WorkerID       string                     `json:"worker_id,omitempty"`
 	Context        string                     `json:"context"`
 	TimeoutSeconds int                        `json:"timeout_seconds"`
 	Trigger        protocol.AutomationTrigger `json:"trigger"`
@@ -35,7 +36,7 @@ func boolInt(value bool) int {
 }
 
 func normalizeAutomation(
-	requestKey, title, workflowID, repositoryID, contextValue string,
+	requestKey, title, workflowID, repositoryID, workerID, contextValue string,
 	timeoutSeconds int,
 	trigger protocol.AutomationTrigger,
 	requireRequestKey bool,
@@ -43,8 +44,8 @@ func normalizeAutomation(
 	value := normalizedAutomation{
 		RequestKey: strings.TrimSpace(requestKey),
 		Title:      strings.TrimSpace(title), WorkflowID: strings.TrimSpace(workflowID),
-		RepositoryID: strings.TrimSpace(repositoryID), Context: contextValue,
-		TimeoutSeconds: timeoutSeconds, Trigger: trigger,
+		RepositoryID: strings.TrimSpace(repositoryID), WorkerID: strings.TrimSpace(workerID),
+		Context: contextValue, TimeoutSeconds: timeoutSeconds, Trigger: trigger,
 	}
 	if requireRequestKey && (value.RequestKey == "" || len(value.RequestKey) > 200) {
 		return value, "", invalid("invalid_request_key", "request_key is required and limited to 200 bytes")
@@ -57,6 +58,9 @@ func normalizeAutomation(
 	}
 	if repositoryID != "" && value.RepositoryID == "" {
 		return value, "", invalid("invalid_repository", "repository_id is required")
+	}
+	if value.WorkerID != "" && len(value.WorkerID) > 200 {
+		return value, "", invalid("invalid_pinned_worker", "worker_id is limited to 200 bytes")
 	}
 	if len([]byte(value.Context)) > protocol.MaxAutomationContextBytes {
 		return value, "", invalid("invalid_automation_context", "context is limited to 8 KiB")
@@ -200,7 +204,7 @@ func (s *Store) CreateAutomation(
 	input protocol.CreateAutomationRequest,
 ) (protocol.AutomationDetail, bool, error) {
 	value, titleKey, err := normalizeAutomation(
-		input.RequestKey, input.Title, input.WorkflowID, input.RepositoryID,
+		input.RequestKey, input.Title, input.WorkflowID, input.RepositoryID, input.WorkerID,
 		input.Context, input.TimeoutSeconds, input.Trigger, true,
 	)
 	if err != nil {
@@ -251,6 +255,11 @@ func (s *Store) CreateAutomation(
 	if err := validateAutomationDependencies(ctx, tx, value.WorkflowID, value.RepositoryID, false); err != nil {
 		return protocol.AutomationDetail{}, false, err
 	}
+	if value.WorkerID != "" {
+		if err := s.validatePinnedWorker(ctx, tx, value.WorkerID, value.RepositoryID); err != nil {
+			return protocol.AutomationDetail{}, false, err
+		}
+	}
 	if err := s.validateAutomationCandidateRepositories(ctx, tx, value.Trigger.CandidateRepositoryIDs); err != nil {
 		return protocol.AutomationDetail{}, false, err
 	}
@@ -277,10 +286,11 @@ func (s *Store) CreateAutomation(
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO automations(
 			id, request_key, request_digest, title, title_key, workflow_id,
-			repository_id, context, timeout_seconds, trigger_type, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			repository_id, pinned_worker_id, context, timeout_seconds, trigger_type, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, automationID, value.RequestKey, digest, value.Title, titleKey, value.WorkflowID,
-		value.RepositoryID, value.Context, value.TimeoutSeconds, value.Trigger.Type, now, now); err != nil {
+		value.RepositoryID, nullableString(value.WorkerID), value.Context, value.TimeoutSeconds,
+		value.Trigger.Type, now, now); err != nil {
 		return protocol.AutomationDetail{}, false, unavailable(err)
 	}
 	if value.Trigger.Type == protocol.AutomationTriggerGitHubIssue {
@@ -378,10 +388,42 @@ func validateAutomationDependencies(
 	return nil
 }
 
+func (s *Store) validatePinnedWorker(
+	ctx context.Context,
+	tx *sql.Tx,
+	workerID, repositoryID string,
+) error {
+	var acceptsManaged int
+	err := tx.QueryRowContext(ctx, `
+		SELECT accepts_managed_repositories FROM workers WHERE id = ?
+	`, workerID).Scan(&acceptsManaged)
+	if errors.Is(err, sql.ErrNoRows) {
+		return invalid("pinned_worker_not_found", "the pinned worker was not found")
+	} else if err != nil {
+		return unavailable(err)
+	}
+	var advertised int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT advertised FROM worker_repositories WHERE worker_id = ? AND repository_id = ?
+	`, workerID, repositoryID).Scan(&advertised); err == nil && advertised == 1 {
+		return nil
+	} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return unavailable(err)
+	}
+	if acceptsManaged != 1 {
+		return conflict(
+			"pinned_worker_cannot_acquire_repository",
+			"the pinned worker does not advertise the repository and cannot acquire managed repositories",
+		)
+	}
+	return nil
+}
+
 const automationSelect = `
 	SELECT automation.id, automation.title, automation.workflow_id,
 	       workflow_revision.title, workflow_revision.revision_number,
 	       automation.repository_id, repository.remote_identity,
+	       automation.pinned_worker_id,
 	       automation.context, automation.timeout_seconds, automation.enabled,
 	       automation.version, automation.trigger_type,
 	       (SELECT COUNT(*) FROM automation_github_issue_triggers typed_issue WHERE typed_issue.automation_id = automation.id),
@@ -419,6 +461,7 @@ func scanAutomation(row scanner) (protocol.Automation, error) {
 	var enabled, issueTriggerCount, pullRequestTriggerCount, scheduleTriggerCount, jiraTriggerCount int
 	var includeDrafts int
 	var labels, baseBranches, projectKeys, candidateRepositoryIDs []byte
+	var pinnedWorkerID sql.NullString
 	var jql, jiraAssignee string
 	var lastChecked, nextCheck, nextDue sql.NullInt64
 	var createdAt, updatedAt int64
@@ -426,6 +469,7 @@ func scanAutomation(row scanner) (protocol.Automation, error) {
 		&automation.ID, &automation.Title, &automation.WorkflowID,
 		&automation.WorkflowTitle, &automation.WorkflowRevision,
 		&automation.RepositoryID, &automation.RepositoryIdentity,
+		&pinnedWorkerID,
 		&automation.Context, &automation.TimeoutSeconds, &enabled,
 		&automation.Version, &automation.Trigger.Type, &issueTriggerCount, &pullRequestTriggerCount, &scheduleTriggerCount, &jiraTriggerCount,
 		&automation.Trigger.State,
@@ -440,6 +484,7 @@ func scanAutomation(row scanner) (protocol.Automation, error) {
 	if err != nil {
 		return automation, err
 	}
+	automation.WorkerID = pinnedWorkerID.String
 	automation.Enabled = enabled != 0
 	switch automation.Trigger.Type {
 	case protocol.AutomationTriggerGitHubIssue:
@@ -592,7 +637,7 @@ func (s *Store) UpdateAutomation(
 	input protocol.UpdateAutomationRequest,
 ) (protocol.AutomationDetail, error) {
 	value, titleKey, err := normalizeAutomation(
-		"", input.Title, input.WorkflowID, "", input.Context,
+		"", input.Title, input.WorkflowID, "", input.WorkerID, input.Context,
 		input.TimeoutSeconds, input.Trigger, false,
 	)
 	if err != nil {
@@ -627,9 +672,11 @@ func (s *Store) UpdateAutomation(
 	var currentTitle, currentTitleKey, currentWorkflowID, currentContext, currentType, currentState string
 	var currentCron, currentTimezone, currentJQL, currentAssignee string
 	var currentLabels, currentBaseBranches, currentProjectKeys, currentCandidateRepositoryIDs []byte
+	var currentPinnedWorkerID sql.NullString
 	err = tx.QueryRowContext(ctx, `
 		SELECT automation.version, automation.enabled, automation.title, automation.title_key,
-		       automation.workflow_id, automation.context, automation.timeout_seconds,
+		       automation.workflow_id, automation.pinned_worker_id,
+		       automation.context, automation.timeout_seconds,
 		       automation.trigger_type,
 		       (SELECT COUNT(*) FROM automation_github_issue_triggers typed_issue WHERE typed_issue.automation_id = automation.id),
 		       (SELECT COUNT(*) FROM automation_github_pull_request_triggers typed_pull_request WHERE typed_pull_request.automation_id = automation.id),
@@ -653,6 +700,7 @@ func (s *Store) UpdateAutomation(
 		WHERE automation.id = ?
 	`, strings.TrimSpace(automationID)).Scan(
 		&currentVersion, &enabled, &currentTitle, &currentTitleKey, &currentWorkflowID,
+		&currentPinnedWorkerID,
 		&currentContext, &currentTimeout, &currentType, &issueTriggerCount, &pullRequestTriggerCount, &scheduleTriggerCount, &jiraTriggerCount,
 		&currentState, &currentIncludeDrafts,
 		&currentLabels, &currentBaseBranches, &currentJQL, &currentProjectKeys, &currentAssignee, &currentCandidateRepositoryIDs,
@@ -689,7 +737,8 @@ func (s *Store) UpdateAutomation(
 	}
 	exactReplay := currentVersion == input.ExpectedVersion+1 &&
 		currentTitle == value.Title && currentTitleKey == titleKey && currentWorkflowID == value.WorkflowID &&
-		currentContext == value.Context && currentTimeout == value.TimeoutSeconds
+		currentContext == value.Context && currentTimeout == value.TimeoutSeconds &&
+		currentPinnedWorkerID.String == value.WorkerID
 	if currentType == protocol.AutomationTriggerSchedule {
 		exactReplay = exactReplay && currentCron == value.Trigger.Cron && currentTimezone == value.Trigger.Timezone
 	} else if currentType == protocol.AutomationTriggerJiraIssue {
@@ -723,6 +772,11 @@ func (s *Store) UpdateAutomation(
 	if err := validateAutomationDependencies(ctx, tx, value.WorkflowID, repositoryID, false); err != nil {
 		return protocol.AutomationDetail{}, err
 	}
+	if value.WorkerID != "" {
+		if err := s.validatePinnedWorker(ctx, tx, value.WorkerID, repositoryID); err != nil {
+			return protocol.AutomationDetail{}, err
+		}
+	}
 	if err := s.validateAutomationCandidateRepositories(ctx, tx, value.Trigger.CandidateRepositoryIDs); err != nil {
 		return protocol.AutomationDetail{}, err
 	}
@@ -737,10 +791,12 @@ func (s *Store) UpdateAutomation(
 	now := s.now().UnixMilli()
 	result, err := tx.ExecContext(ctx, `
 		UPDATE automations
-		SET title = ?, title_key = ?, workflow_id = ?, context = ?, timeout_seconds = ?,
+		SET title = ?, title_key = ?, workflow_id = ?, pinned_worker_id = ?,
+		    context = ?, timeout_seconds = ?,
 		    version = version + 1, updated_at = ?
 		WHERE id = ? AND version = ? AND enabled = 0
-	`, value.Title, titleKey, value.WorkflowID, value.Context, value.TimeoutSeconds,
+	`, value.Title, titleKey, value.WorkflowID, nullableString(value.WorkerID),
+		value.Context, value.TimeoutSeconds,
 		now, automationID, input.ExpectedVersion)
 	if err != nil {
 		return protocol.AutomationDetail{}, unavailable(err)

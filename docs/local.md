@@ -144,10 +144,11 @@ Automations and API task creation.
 
 In the UI:
 
-1. Open Workers and confirm the worker is online and healthy.
+1. Open Workers and confirm a matching worker is online and healthy.
 2. Select Delegate task.
 3. Enter a title and description.
-4. Select the worker and repository.
+4. Choose a worker and repository, or choose **Any eligible worker** to route by
+   load and optionally narrow the pool with the **Agent** and **Model** fields.
 5. Submit.
 
 The Work view shows the task state. Task detail shows attempts, lifecycle events,
@@ -174,6 +175,56 @@ Worker and repository IDs are available from:
 curl --fail --silent --show-error \
   http://127.0.0.1:7337/api/v1/workers
 ```
+
+## Route work to a specific worker
+
+Manual and Automation dispatch can pin work to one worker, or narrow the
+eligible pool by agent and model, instead of always choosing the least loaded
+eligible worker.
+
+A route-based task freezes one worker before the repository exists in its local
+cache:
+
+```sh
+curl --fail --silent --show-error \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "request_key": "manual-pinned-1",
+    "title": "Implement the change",
+    "description": "Implement the requested change and commit it.",
+    "route": {
+      "repository_remote_identity": "github.com/OWNER/REPOSITORY",
+      "source_access": {"provider": "github", "hostname": "github.com"},
+      "worker_id": "WORKER_ID"
+    },
+    "timeout_seconds": 7200
+  }' \
+  http://127.0.0.1:7337/api/v1/tasks
+```
+
+A route with no `worker_id` can still filter candidates by `agent` and `model`
+(the values a worker advertises in its TOML and during registration):
+
+```json
+{
+  "route": {
+    "repository_remote_identity": "github.com/OWNER/REPOSITORY",
+    "source_access": {"provider": "github", "hostname": "github.com"},
+    "model": "openai/gpt-5"
+  }
+}
+```
+
+When `worker_id` is set on a route, the scheduler selects exactly that worker;
+an offline, paused, unhealthy, or incapable worker fails the route with
+`no_eligible_worker` instead of falling back to another worker. A route with no
+`worker_id` and no `agent`/`model` uses plain fair-load cattle routing.
+
+Automations accept an optional `worker_id` on create and edit. The Automation
+detail screen and the form show the pinned worker. Dispatch always assigns the
+pinned worker's identity; if the pinned worker is unavailable at dispatch time,
+the durable occurrence stays pending with a diagnostic and retries, exactly like
+an empty cattle pool. Leave `worker_id` unset to keep fair-load routing.
 
 ## Data and overrides
 

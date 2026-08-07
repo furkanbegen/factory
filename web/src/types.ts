@@ -206,6 +206,7 @@ export interface Automation {
 	workflow_revision: number;
 	repository_id: string;
 	repository_identity: string;
+	worker_id?: string;
 	context: string;
 	timeout_seconds: number;
 	enabled: boolean;
@@ -329,6 +330,7 @@ export interface CreateAutomationInput {
 	title: string;
 	workflow_id: string;
 	repository_id: string;
+	worker_id?: string;
 	context: string;
 	timeout_seconds: number;
 	trigger: AutomationTrigger;
@@ -391,12 +393,21 @@ export interface APIErrorBody {
   error: { code: string; message: string };
 }
 
+export interface CreateTaskRoute {
+  repository_remote_identity: string;
+  source_access: { provider: "github"; hostname: "github.com" };
+  worker_id?: string;
+  agent?: string;
+  model?: string;
+}
+
 interface CreateTaskBaseInput {
   request_key: string;
   title: string;
-  worker_id: string;
-  repository_id: string;
+  worker_id?: string;
+  repository_id?: string;
   repository_set_ids?: string[];
+  route?: CreateTaskRoute;
   timeout_seconds: number;
 }
 

@@ -191,6 +191,9 @@ func (request *CreateTaskRequest) UnmarshalJSON(data []byte) error {
 type TaskRoute struct {
 	RepositoryRemoteIdentity string       `json:"repository_remote_identity"`
 	SourceAccess             SourceAccess `json:"source_access"`
+	WorkerID                 string       `json:"worker_id,omitempty"`
+	Agent                    string       `json:"agent,omitempty"`
+	Model                    string       `json:"model,omitempty"`
 }
 
 type Task struct {
@@ -511,6 +514,7 @@ type Automation struct {
 	WorkflowRevision   int                    `json:"workflow_revision"`
 	RepositoryID       string                 `json:"repository_id"`
 	RepositoryIdentity string                 `json:"repository_identity"`
+	WorkerID           string                 `json:"worker_id,omitempty"`
 	Context            string                 `json:"context"`
 	TimeoutSeconds     int                    `json:"timeout_seconds"`
 	Enabled            bool                   `json:"enabled"`
@@ -679,6 +683,7 @@ type CreateAutomationRequest struct {
 	Title          string            `json:"title"`
 	WorkflowID     string            `json:"workflow_id"`
 	RepositoryID   string            `json:"repository_id"`
+	WorkerID       string            `json:"worker_id,omitempty"`
 	Context        string            `json:"context"`
 	TimeoutSeconds int               `json:"timeout_seconds"`
 	Trigger        AutomationTrigger `json:"trigger"`
@@ -688,6 +693,7 @@ type UpdateAutomationRequest struct {
 	ExpectedVersion int               `json:"expected_version"`
 	Title           string            `json:"title"`
 	WorkflowID      string            `json:"workflow_id"`
+	WorkerID        string            `json:"worker_id,omitempty"`
 	Context         string            `json:"context"`
 	TimeoutSeconds  int               `json:"timeout_seconds"`
 	Trigger         AutomationTrigger `json:"trigger"`

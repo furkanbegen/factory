@@ -27,6 +27,7 @@ import type {
   LegacyPollerMigration,
   LegacyPollerSelection,
   TestAutomationResult,
+  Worker,
 } from "./types";
 import {
   EmptyState,
@@ -106,7 +107,7 @@ export function AutomationsView({ onAutomation }: { onAutomation: (id: string) =
             <button className="automation-row" key={automation.id} onClick={() => onAutomation(automation.id)}>
               <span className="workflow-identity">
                 <strong>{automation.title}</strong>
-                <small>{automation.repository_identity} · {triggerSummary(automation)}</small>
+                <small>{automation.repository_identity} · {triggerSummary(automation)}{automation.worker_id ? ` · pinned worker ${automation.worker_id}` : ""}</small>
               </span>
               <span className="automation-list-health"><HealthBadge automation={automation} /><small>{automation.health.message || "No health detail."}</small></span>
               <span className="automation-list-copy"><strong>{automation.matched_count} matched</strong><small>{automation.skipped_count} reused · {automation.dispatched_count} dispatched</small></span>
@@ -178,6 +179,7 @@ export function AutomationDetail({
     refetchInterval: interval,
   });
   const repositories = useQuery({ queryKey: ["repositories"], queryFn: api.repositories });
+  const workers = useQuery({ queryKey: ["workers"], queryFn: api.workers });
   const loadMoreOccurrences = useMutation({
     mutationFn: ({ cursor }: { cursor: string; headCursor: string | null }) => api.automationOccurrences(id, cursor),
     onSuccess: (page, request) => {
@@ -331,6 +333,7 @@ export function AutomationDetail({
           <dl className="metadata">
             <div><dt>Workflow</dt><dd>{automation.workflow_title} · revision {automation.workflow_revision}</dd></div>
             <div><dt>Repository</dt><dd className="mono">{automation.repository_identity}</dd></div>
+            <div><dt>Pinned worker</dt><dd>{pinnedWorkerLabel(automation, workers.data)}</dd></div>
             {automation.trigger.type === "schedule" ? <>
               <div><dt>Cron</dt><dd className="mono">{automation.trigger.cron}</dd></div>
               <div><dt>Timezone</dt><dd>{automation.trigger.timezone}</dd></div>
@@ -672,6 +675,7 @@ function AutomationForm({
   const titleID = useId();
   const workflowID = useId();
   const repositoryID = useId();
+  const workerID = useId();
   const triggerTypeID = useId();
   const stateID = useId();
   const labelsID = useId();
@@ -689,6 +693,7 @@ function AutomationForm({
   const [errors, setErrors] = useState<Record<string, string>>({});
   const workflows = useQuery({ queryKey: ["workflows", "automation-form"], queryFn: api.allWorkflows });
   const repositories = useQuery({ queryKey: ["repositories"], queryFn: api.repositories });
+  const workers = useQuery({ queryKey: ["workers"], queryFn: api.workers });
   const current = detail?.automation;
   const candidateRepoItems = (repositories.data ?? [])
     .filter((repo) => repo.enabled && repo.id !== current?.repository_id);
@@ -729,6 +734,7 @@ function AutomationForm({
             expected_version: current!.version,
             title: input.title,
             workflow_id: input.workflow_id,
+            worker_id: input.worker_id,
             context: input.context,
             timeout_seconds: input.timeout_seconds,
             trigger: input.trigger,
@@ -745,6 +751,7 @@ function AutomationForm({
     const title = String(form.get("title") ?? "").trim();
     const workflow = String(form.get("workflow_id") ?? "");
     const repository = current?.repository_id ?? String(form.get("repository_id") ?? "");
+    const worker = String(form.get("worker_id") ?? "").trim();
     const context = String(form.get("context") ?? "");
     const timeout = Number(form.get("timeout_seconds"));
     const pollInterval = Number(form.get("poll_interval_seconds"));
@@ -804,6 +811,7 @@ function AutomationForm({
       title,
       workflow_id: workflow,
       repository_id: repository,
+      ...(worker ? { worker_id: worker } : {}),
       context,
       timeout_seconds: timeout,
       trigger,
@@ -851,6 +859,16 @@ function AutomationForm({
                   {selectedRepository?.remote_identity ?? current.repository_identity}{selectedRepository?.enabled === false ? " (disabled)" : ""}
                 </option>}
                 {repositoryItems.filter((repository) => repository.id !== current?.repository_id).map((repository) => <option key={repository.id} value={repository.id}>{repository.remote_identity}{repository.enabled ? "" : " (disabled)"}</option>)}
+              </select>
+            </Field>
+            <Field label="Pinned worker" htmlFor={workerID} hint="Optional. Leave unset to route by load to any eligible worker.">
+              <select id={workerID} name="worker_id" defaultValue={current?.worker_id ?? ""} disabled={workers.isPending}>
+                <option value="">Any eligible worker</option>
+                {(workers.data ?? []).map((worker) => (
+                  <option key={worker.id} value={worker.id}>
+                    {worker.name} · {worker.runtime}{worker.model ? ` · ${worker.model}` : ""} · {worker.online ? "online" : "offline"}{worker.accepting_work ? "" : " · paused"}
+                  </option>
+                ))}
               </select>
             </Field>
             <Field label="Trigger type" htmlFor={triggerTypeID} hint={mode === "edit" ? "Trigger type is immutable." : undefined}>
@@ -984,6 +1002,13 @@ function HealthBadge({ automation }: { automation: Automation }) {
 
 function Metric({ label, value }: { label: string; value: string | number }) {
   return <div><span>{label}</span><strong>{value}</strong></div>;
+}
+
+function pinnedWorkerLabel(automation: Automation, workers?: Worker[]): string {
+  if (!automation.worker_id) return "Any eligible worker (routed by load)";
+  const worker = workers?.find((candidate) => candidate.id === automation.worker_id);
+  if (!worker) return `Worker ${automation.worker_id} (offline)`;
+  return `${worker.name} · ${worker.runtime}${worker.model ? ` · ${worker.model}` : ""} · ${worker.online ? "online" : "offline"}`;
 }
 
 function triggerSummary(automation: Automation): string {

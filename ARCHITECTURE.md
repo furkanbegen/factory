@@ -60,7 +60,10 @@ the system does not use WebSockets.
 1. One worker identity has one immutable runtime, `codex`, `claude-code`, or
    `opencode`.
 2. Every task freezes one worker and one control-plane repository. Routed work
-   may select a cattle worker before that repository exists in its local cache.
+   may select a cattle worker before that repository exists in its local cache,
+   or freeze an explicit worker when the caller or Automation pins one. A pinned
+   or selected worker that is offline, paused, unhealthy, or incapable fails the
+   route rather than silently falling back.
 3. Only a healthy, recently registered worker with free capacity can claim its
    queued work.
 4. A lease token owns one active attempt. Active operations require a matching,
@@ -87,7 +90,10 @@ the system does not use WebSockets.
     claim task description.
 13. A typed Automation is created disabled. One issue, pull request, Jira
     issue, scheduled UTC instant, or idempotent Run now key creates at most one
-    durable Occurrence and one ordinary Task per Automation.
+    durable Occurrence and one ordinary Task per Automation. An Automation may
+    pin one worker identity; dispatch then routes only to that worker and keeps
+    its Occurrence pending with a diagnostic when the pinned worker is
+    unavailable.
 
 ## 4. Components and dependencies
 
@@ -214,16 +220,18 @@ Node.js is a contributor dependency only when UI source changes.
 1. A caller submits a unique `request_key`, title, either a free-text
    `description` or a pinned Workflow revision with free-text `context`, an
    optional timeout, and either an explicit worker/repository pair or a
-   repository remote plus source-access route. The two prompt forms are
-   exclusive.
+   repository remote plus source-access route. A route may also pin a
+   `worker_id` or narrow candidates by `agent` and `model`. The two prompt forms
+   are exclusive.
 2. The control plane returns an existing task before rechecking mutable
    Workflow state when the request key is a replay. For a new task it validates
    the selected revision and enabled Workflow, then composes and bounds the
    resolved prompt.
 3. For a route, the control plane requires an enabled managed repository,
-   chooses an eligible worker by fair load, and freezes both IDs. It then
-   snapshots the context, Workflow identity, revision, and resolved prompt while
-   creating one task and one queued execution.
+   chooses an eligible worker by fair load after applying any pinned worker,
+   agent, and model selectors, and freezes both IDs. It then snapshots the
+   context, Workflow identity, revision, and resolved prompt while creating one
+   task and one queued execution.
 4. The assigned worker polls its claim endpoint with a unique request ID and
    lease token.
 5. The control plane verifies worker health, recency, capacity, runtime,
@@ -268,7 +276,10 @@ Node.js is a contributor dependency only when UI source changes.
    stores every new typed Occurrence, updates health and counters, and advances
    the next check. Repeated issues reuse the existing Occurrence identity.
 5. A later transaction routes the pending Occurrence, creates or exactly
-   recovers its deterministic Task, and links the Task to the Occurrence.
+   recovers its deterministic Task, and links the Task to the Occurrence. A
+   pinned worker identity freezes that worker for the routed Task; an
+   unavailable pinned worker keeps the Occurrence pending with an actionable
+   diagnostic.
 6. The prompt separates trusted configured conditions from bounded untrusted
    GitHub metadata and requires authenticated `gh` live-state revalidation
    before mutation.
@@ -289,7 +300,8 @@ Node.js is a contributor dependency only when UI source changes.
    and never changes the due cursor.
 5. The existing occurrence dispatcher routes the snapshotted Workflow and
    repository as an ordinary Task. Schedule work does not require provider
-   access, and workers retain the same claim contract.
+   access, workers retain the same claim contract, and a pinned worker identity
+   applies exactly as for provider Automations.
 
 ### Attempt execution
 
@@ -426,7 +438,7 @@ Task     1 --- 1 Execution       1 --- * Attempt 1 --- * AttemptEvent
   work but does not rewrite existing assignments.
 - An Automation stores one concrete `github_issue`, `github_pull_request`,
   `jira_issue`, or `schedule` Trigger, health and polling or due cursor,
-  counters, and disabled-first state. Its
+  counters, disabled-first state, and an optional pinned worker identity. Its
   Occurrences snapshot the Workflow revision, repository, predicate,
   observation, prompt, and deterministic Task request key before dispatch.
 - Automation and Occurrence collection APIs use opaque descending cursors, so

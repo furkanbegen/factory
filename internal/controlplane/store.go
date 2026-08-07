@@ -1476,6 +1476,18 @@ func normalizeTaskRoute(route *protocol.TaskRoute) error {
 		)
 	}
 	route.SourceAccess = values[0]
+	route.WorkerID = strings.TrimSpace(route.WorkerID)
+	if route.WorkerID != "" && len(route.WorkerID) > 200 {
+		return invalid("invalid_route", "route worker_id is limited to 200 bytes")
+	}
+	route.Agent = strings.TrimSpace(route.Agent)
+	if route.Agent != "" && len(route.Agent) > 200 {
+		return invalid("invalid_route", "route agent is limited to 200 bytes")
+	}
+	route.Model = strings.TrimSpace(route.Model)
+	if route.Model != "" && len(route.Model) > 200 {
+		return invalid("invalid_route", "route model is limited to 200 bytes")
+	}
 	if route.SourceAccess.Provider == "github" && route.SourceAccess.Hostname == "github.com" {
 		canonical, err := normalizeManagedGitHubRemote(route.RepositoryRemoteIdentity)
 		if err != nil {
@@ -1605,6 +1617,24 @@ func (s *Store) selectTaskRouteWithSourceRequirement(
 	if err != nil {
 		return taskRouteCandidate{}, unavailable(err)
 	}
+	selectorPredicate := ""
+	selectorArgs := []any{
+		repositoryID, now - protocol.WorkerOnlineWindow.Milliseconds(), repositoryIdentity, repositoryID,
+		repositoryID, protocol.MaxRepositoryCacheEntries,
+		repositoryID, repositoryID, protocol.MaxRetainedPerRepo,
+	}
+	if route.WorkerID != "" {
+		selectorPredicate += " AND w.id = ?"
+		selectorArgs = append(selectorArgs, route.WorkerID)
+	}
+	if route.Agent != "" {
+		selectorPredicate += " AND w.agent = ?"
+		selectorArgs = append(selectorArgs, route.Agent)
+	}
+	if route.Model != "" {
+		selectorPredicate += " AND w.model = ?"
+		selectorArgs = append(selectorArgs, route.Model)
+	}
 	rows, err := tx.QueryContext(ctx, `
 		SELECT w.id, w.runtime, w.capacity, w.active_count,
 		       w.source_access_json, COALESCE(wr.advertised, 0),
@@ -1672,10 +1702,9 @@ func (s *Store) selectTaskRouteWithSourceRequirement(
 		        AND terminal_attempt.state IN ('succeeded', 'failed', 'cancelled', 'lost')
 		        AND terminal_attempt.capacity_acknowledged = 0
 		  ) < ?
+		  `+selectorPredicate+`
 		ORDER BY w.id
-	`, repositoryID, now-protocol.WorkerOnlineWindow.Milliseconds(), repositoryIdentity, repositoryID,
-		repositoryID, protocol.MaxRepositoryCacheEntries,
-		repositoryID, repositoryID, protocol.MaxRetainedPerRepo)
+	`, selectorArgs...)
 	if err != nil {
 		return taskRouteCandidate{}, unavailable(err)
 	}

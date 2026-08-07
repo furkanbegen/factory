@@ -1850,6 +1850,7 @@ func (s *Store) dispatchOccurrence(ctx context.Context, occurrenceID string) err
 	var issueKey sql.NullString
 	var candidateRepositoryIDs []byte
 	var scheduleKind, runRequestKey sql.NullString
+	var pinnedWorkerID sql.NullString
 	var workflowID, workflowTitle string
 	var workflowRevisionNumber, automationEnabled, workflowEnabled, repositoryEnabled int
 	err = tx.QueryRowContext(ctx, `
@@ -1862,6 +1863,7 @@ func (s *Store) dispatchOccurrence(ctx context.Context, occurrenceID string) err
 		       jira.issue_key,
 		       COALESCE(jira_config.candidate_repository_ids_json, '[]'),
 		       schedule.kind, schedule.scheduled_at, schedule.run_request_key,
+		       automation.pinned_worker_id,
 		       revision.workflow_id, revision.title, revision.revision_number,
 		       automation.enabled, workflow.enabled, repository.enabled
 		FROM automation_occurrences occurrence
@@ -1886,6 +1888,7 @@ func (s *Store) dispatchOccurrence(ctx context.Context, occurrenceID string) err
 		&issueNumber, &pullRequestNumber, &issueKey,
 		&candidateRepositoryIDs,
 		&scheduleKind, &scheduledAt, &runRequestKey,
+		&pinnedWorkerID,
 		&workflowID, &workflowTitle, &workflowRevisionNumber,
 		&automationEnabled, &workflowEnabled, &repositoryEnabled,
 	)
@@ -1933,6 +1936,9 @@ func (s *Store) dispatchOccurrence(ctx context.Context, occurrenceID string) err
 		return unavailable(errors.New("Automation Occurrence has an invalid trigger type"))
 	}
 	route := protocol.TaskRoute{RepositoryRemoteIdentity: repositoryIdentity}
+	if pinnedWorkerID.Valid && pinnedWorkerID.String != "" {
+		route.WorkerID = pinnedWorkerID.String
+	}
 	requiresSourceAccess := false
 	if triggerType != protocol.AutomationTriggerSchedule {
 		route.SourceAccess = protocol.SourceAccess{Provider: "github", Hostname: "github.com"}
