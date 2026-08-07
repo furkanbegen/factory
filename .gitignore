@@ -1,3 +1,6 @@
+# Custom local scripts, never pushed.
+scripts/custom/
+
 # Legacy local build artifacts.
 /target/
 # Legacy preview state. Current defaults use ~/.factory.
